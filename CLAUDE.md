@@ -41,12 +41,13 @@ Consequences for the design:
 | Path | What |
 |---|---|
 | `DoesItDie/DoesItDie.lua` | The whole addon, in sections: constants and tables, helpers, description parsing, DoT tracking (combo points, cast outcomes, tick matching), display, options panel, events, slash commands |
-| `DoesItDie/Textures/` | Generated TGA patterns (dashes, stripes, spark, shine) |
+| `DoesItDie/Textures/` | Generated TGAs: patterns (dashes, stripes, spark, shine) and the sunglasses icon |
 | `tools/make_textures.py` | Regenerates the textures |
 | `tools/scrape_forever_spellbook.py` | Scrapes all nine class spellbooks from foreverchanges.pro into `tools/data/forever_spellbook.json` |
 | `tools/test_parse.py` | Runs the addon's real description parser (in Lua, via `lupa`) on hand-written tooltips |
 | `tools/test_spellbook.py` | Runs every scraped Forever damage tooltip through the parser and compares with a reviewed snapshot (`tools/data/spellbook_expected.json`) |
 | `tools/test_tracking.py` | Plays scripted fights through the real tracking code with game APIs stubbed: tick matching, dodges/misses, recasts, combo points, first-tick waiting. Includes replays of real in-game logs |
+| `tools/test_display.py` | Loads the real display code with mocked frames and checks the per-DoT segments (running totals, colors, dividers, text breakdown) |
 | `WillItDieProbe/` | The original diagnostic addon that established the restrictions above. Not linked into the game any more |
 
 ## How the tracking works (high level)
@@ -78,7 +79,7 @@ Tuning constants (tick windows, tolerances, fallbacks) are at the top of `DoesIt
   the main debugging loop. `/did debug` echoes the log to chat.
 - **Slash commands:** `/did` (options), `/did skull` (5-second skull test with geometry logged), `/did line`,
   `/did debug`, `/did reset` (forget learned tick sizes).
-- **Tests:** `pip install lupa`, then run the three `tools/test_*.py` scripts (use `--update` on
+- **Tests:** `pip install lupa`, then run the four `tools/test_*.py` scripts (use `--update` on
   `test_spellbook.py` only after reviewing a change). There's no Lua install; `luaparser` (pip) works as a
   syntax check.
 - **Gotchas:**
