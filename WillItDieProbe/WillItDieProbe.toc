@@ -1,0 +1,7 @@
+## Interface: 16001
+## Title: WillItDie Probe
+## Notes: Diagnostic: checks which combat data addons can read in WoW Forever.
+## Version: 0.1
+## SavedVariables: WillItDieProbeDB
+
+WillItDieProbe.lua

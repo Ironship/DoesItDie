@@ -1,0 +1,1519 @@
+-- DoesItDie
+-- Tracks your DoTs on the target and shows the damage they still have to deal as a marker on its health
+-- bar (if the health ends inside the marker, the DoTs will kill it), plus a skull on the portrait when
+-- they're lethal. Look and animation are configurable in the options panel (/did).
+--
+-- In WoW: Forever, target health, player stats and auras are secret in combat, so addon code can
+-- never compare "health vs DoT damage" itself. What stays readable:
+--   * our own casts (UNIT_SPELLCAST_SUCCEEDED) and spell descriptions -> which DoT, base damage, duration
+--   * UNIT_COMBAT damage amounts on units -> actual tick sizes (already include resists/reductions)
+-- StatusBars accept secret values, so the "damage >= health" comparison is done by the widget, not
+-- by Lua: see the skull notes in the Display section.
+
+local ADDON_NAME = ...
+
+local UPDATE_INTERVAL = 0.1
+local DEFAULT_TICK_INTERVAL = 3
+-- Seconds either side of an expected tick time. Observed on Forever: the first tick lands within ~0.1s of one
+-- interval after the cast, and later ticks within ~0.1s of the first tick's rhythm. Tight windows keep melee
+-- auto-attacks (same Physical school as bleeds, similar size, ~1s rhythm) from passing as ticks.
+local TICK_MATCH_WINDOW = 0.45
+local TICK_MATCH_WINDOW_ANCHORED = 0.25
+local MISSED_TICKS_BEFORE_DROP = 2  -- a DoT that never ticks was resisted/immune
+-- Once a DoT's tick size is known, same-school hits further off than this are someone else's (the Imp's
+-- Firebolt next to Immolate, white hits next to Rip). Ticks within one cast barely vary (15,15,15,16);
+-- the minimum slack of 1 covers rounding (3 vs 4).
+local TICK_AMOUNT_TOLERANCE = 0.25
+-- Check for the first tick against a size learned on an earlier cast (gear/AP may have changed a little).
+local FIRST_TICK_AMOUNT_TOLERANCE = 0.3
+-- A crit tick is 1.5-2x a normal one; anything else flagged as a crit (white-hit crits) isn't this DoT.
+local CRIT_MIN_RATIO, CRIT_MAX_RATIO = 1.3, 2.3
+local DB_VERSION = 4                -- bump to discard learned data from older, buggier versions
+
+-- Tick intervals that differ from the 3s default and aren't stated in the description.
+local KNOWN_TICK_INTERVALS = {
+    ["Insect Swarm"] = 2,
+    ["Curse of Agony"] = 2,
+    ["Bane of Agony"] = 2, -- Forever's name for Curse of Agony
+    ["Fireball"] = 2,
+    ["Holy Fire"] = 2,
+    ["Rip"] = 2,
+    ["Rupture"] = 2,
+}
+
+-- Descriptions that don't name their school.
+local SCHOOL_BY_NAME = {
+    ["Siphon Life"] = 32,
+}
+
+-- Read like DoTs but aren't one on the current target: ground/area effects, channels, traps, and
+-- delayed damage (Wyvern Sting only starts after the sleep).
+local IGNORED_SPELLS = {
+    ["Rain of Fire"] = true, ["Hellfire"] = true, ["Blizzard"] = true, ["Flamestrike"] = true,
+    ["Consecration"] = true, ["Hurricane"] = true, ["Volley"] = true,
+    ["Drain Life"] = true, ["Drain Soul"] = true, ["Drain Mana"] = true, ["Health Funnel"] = true,
+    ["Mind Flay"] = true, ["Arcane Missiles"] = true, ["Starshards"] = true,
+    ["Immolation Trap"] = true, ["Explosive Trap"] = true, ["Wyvern Sting"] = true,
+}
+
+local SCHOOL_MASKS = {
+    Physical = 1, Holy = 2, Fire = 4, Nature = 8, Frost = 16, Shadow = 32, Arcane = 64,
+    Frostfire = 4 + 16, -- Forever's Frostfire Bolt: combined schools report as the OR of their masks
+}
+
+-- User options (edited in the options panel, saved in DoesItDieDB).
+local DEFAULTS = {
+    -- Skull
+    showSkull = true,
+    skullIcon = "cross",
+    skullSize = 64,
+    skullPulse = true,
+    skullOffsetX = 0,
+    skullOffsetY = 0,
+    -- Damage marker
+    showMarkers = true,
+    fillTexture = "stripes",
+    fillColor = "purple",
+    fillOpacity = 65,
+    outlineStyle = "dashed",
+    dashLength = 4,
+    outlineThickness = 1,
+    outlineColor = "purple",
+    outlineOpacity = 85,
+    -- Animation
+    smoothMotion = true,
+    flashOnApply = true,
+    pulseOutline = true,
+    -- Effects
+    showSpark = true,
+    showGlow = true,
+    glowSize = 7,
+    showShine = true,
+    shineInterval = 3,
+    scrollStripes = true,
+    -- Damage text
+    showLabel = false,
+    labelPosition = "center",
+    labelSize = 10,
+    labelColor = "white",
+    -- Misc
+    debug = false,
+    preview = false, -- session-only: reset on every load
+    previewPercent = 100,
+    previewOffInCombat = true,
+    -- Accuracy
+    waitFirstTick = "off",
+}
+
+-- "Wait for first tick": whether a DoT counts toward the marker before its first tick has landed.
+-- "unsure" = only when the starting estimate is shaky (finisher with unknown combo points, or no tick size
+-- learned yet for that spell).
+local WAIT_MODES = {
+    { id = "off",    label = "Never (estimate straight away)" },
+    { id = "unsure", label = "When unsure" },
+    { id = "always", label = "Always (real ticks only)" },
+}
+
+local COLOR_PRESETS = {
+    { id = "purple", label = "Purple", rgb = { 0.7, 0.3, 1 } },
+    { id = "gold",   label = "Gold",   rgb = { 1, 0.85, 0.1 } },
+    { id = "white",  label = "White",  rgb = { 1, 1, 1 } },
+    { id = "red",    label = "Red",    rgb = { 1, 0.2, 0.2 } },
+    { id = "orange", label = "Orange", rgb = { 1, 0.55, 0.1 } },
+    { id = "green",  label = "Green",  rgb = { 0.3, 1, 0.3 } },
+    { id = "cyan",   label = "Cyan",   rgb = { 0.2, 0.9, 1 } },
+    { id = "pink",   label = "Pink",   rgb = { 1, 0.45, 0.6 } },
+    { id = "black",  label = "Black",  rgb = { 0, 0, 0 } },
+}
+local COLOR_BY_ID = {}
+for _, preset in ipairs(COLOR_PRESETS) do COLOR_BY_ID[preset.id] = preset.rgb end
+
+local MAX_TRACE_LINES = 500
+
+local db
+local dotsByTarget = {}     -- targetKey -> { [spellName] = dot }
+local warnedSecretGuid = false
+
+---------------------------------------------------------------------------
+-- Helpers
+---------------------------------------------------------------------------
+
+local function print(msg)
+    DEFAULT_CHAT_FRAME:AddMessage("|cffff6666DoesItDie|r " .. msg)
+end
+
+-- Always recorded to SavedVariables (db.log) for diagnosing accuracy; echoed to chat with /did debug.
+local function trace(msg)
+    if not db then return end
+    table.insert(db.log, string.format("%.1f %s", GetTime(), msg))
+    if #db.log > MAX_TRACE_LINES then table.remove(db.log, 1) end
+    if db.debug then print("|cff888888" .. msg .. "|r") end
+end
+
+local function isSecret(v)
+    if type(issecretvalue) ~= "function" then return false end
+    local ok, r = pcall(issecretvalue, v)
+    return ok and r or false
+end
+
+-- Stable key for the mob behind a unit token, or nil if the unit can't be tracked.
+-- The same hit arrives for target, nameplateN and softenemy, and their GUIDs may not all be readable,
+-- so a hidden GUID only affects that one unit token.
+local function unitKey(unit)
+    local ok, guid = pcall(UnitGUID, unit)
+    if ok and not isSecret(guid) then return guid end
+    if unit ~= "target" then return nil end
+    if not warnedSecretGuid then
+        warnedSecretGuid = true
+        trace("Target GUID is secret; tracking DoTs on the current target only")
+    end
+    return "target"
+end
+
+local function spellNameAndDescription(spellID)
+    local name, desc
+    if C_Spell and C_Spell.GetSpellName then
+        name = C_Spell.GetSpellName(spellID)
+    else
+        name = GetSpellInfo(spellID)
+    end
+    local descFn = (C_Spell and C_Spell.GetSpellDescription) or GetSpellDescription
+    if descFn then desc = descFn(spellID) end
+    return name, desc
+end
+
+local function schoolFromWords(words)
+    local school = SCHOOL_MASKS.Physical
+    for word in words:gmatch("%a+") do
+        if SCHOOL_MASKS[word] then school = SCHOOL_MASKS[word] end
+    end
+    return school
+end
+
+-- Finishers (Rip, Rupture) list their DoT per combo point:
+--   "1 point : 243 damage over 12 sec. 2 points: 396 damage over 12 sec. ..."   (Rip; note the stray space)
+--   "1 point: 25 damage over 8 secs\n ... 5 points: 87 damage over 16 secs"      (Rupture)
+-- Returns total, school, duration for the given points (clamped to the listed range), or nil if the
+-- finisher has no per-point DoT (e.g. Eviscerate).
+local function parseFinisher(desc, comboPoints)
+    local byPoints, highest = {}, 0
+    for pointsText, amount, secs in desc:gmatch("(%d+) points?%s*:%s*(%d+) damage over (%d+%.?%d*) sec") do
+        local points = tonumber(pointsText)
+        byPoints[points] = { total = tonumber(amount), duration = tonumber(secs) }
+        highest = math.max(highest, points)
+    end
+    if highest == 0 then return nil end
+    local entry = byPoints[math.max(1, math.min(comboPoints, highest))] or byPoints[highest]
+    return entry.total, SCHOOL_MASKS.Physical, entry.duration
+end
+
+-- Returns total damage, school mask, duration and (if the description states it) tick interval.
+--   "... 10 Nature damage over 15 sec."  Takes the last such clause, so Immolate's
+--       "11 Fire damage and then an additional 20 Fire damage over 15 sec" yields the periodic part.
+--   "Transfers 15 health from the target to the caster every 3 sec. Lasts 30 sec."  (Siphon Life)
+-- comboPoints is only used for finishers. (Rake/Garrote merely award a combo point, so finishers are
+-- recognised by "Finishing move", not "combo point".)
+local function parseDot(desc, comboPoints)
+    if type(desc) ~= "string" or isSecret(desc) then return nil end
+    if desc:find("Finishing move") then return parseFinisher(desc, comboPoints or 5) end
+    -- Weapon enchants (rogue poisons) describe a proc DoT but aren't cast on the target. Match the enchant
+    -- wording only: Lacerate's tooltip also mentions "weapon damage".
+    if desc:find("[Cc]oats a weapon") then return nil end
+    -- Heals over time: Forever's Renew reads "Heals the target of 830 damage over 15 sec".
+    if desc:find("^Heals") then return nil end
+
+    local total, school, duration
+    for amount, words, secs in desc:gmatch("(%d+)%s*([%a ]-)%s*damage over (%d+%.?%d*) sec") do
+        total, school, duration = tonumber(amount), schoolFromWords(words), tonumber(secs)
+    end
+    if total and duration > 0 then return total, school, duration end
+
+    local amount, words, every = desc:match("(%d+)%s*([%a ]-)%s*damage every (%d+%.?%d*) sec")
+    if not amount then
+        amount, every = desc:match("(%d+) health.-every (%d+%.?%d*) sec")
+        words = ""
+    end
+    local lasts = desc:match("[Ll]asts (%d+%.?%d*) sec")
+    if amount and every and lasts then
+        every, lasts = tonumber(every), tonumber(lasts)
+        if every > 0 and lasts > 0 then
+            return tonumber(amount) * math.floor(lasts / every + 0.5), schoolFromWords(words), lasts, every
+        end
+    end
+end
+
+---------------------------------------------------------------------------
+-- DoT tracking
+---------------------------------------------------------------------------
+
+-- Best known damage per tick: observed average of non-crit ticks, else learned from earlier casts,
+-- else the description. Crits are one-offs, so they never raise the expectation for later ticks.
+local function expectedTick(dot)
+    if dot.normalTicks > 0 then return dot.tickSum / dot.normalTicks end
+    return (dot.tickKey and db.ticks[dot.tickKey]) or (dot.total / dot.totalTicks)
+end
+
+-- A waiting DoT doesn't count toward the marker until its first tick lands (see WAIT_MODES).
+local function isWaiting(dot)
+    if dot.ticksSeen > 0 then return false end
+    if db.waitFirstTick == "always" then return true end
+    return db.waitFirstTick == "unsure" and dot.unsure
+end
+
+-- Combo points, for finishers. By UNIT_SPELLCAST_SUCCEEDED they're already spent, so they're read when the
+-- cast is sent. They were unreadable in combat on the Forever beta, so the addon also counts them itself:
+-- builders say "Awards N combo point(s)" in their tooltips; a dodge/parry/miss right after takes them back;
+-- a finisher or a target change resets the count. If neither source knows, finishers assume the lowest
+-- entry, so the estimate errs low (no false skull) and nothing is learned from that cast.
+local COMBO_CAP = 5
+local COMBO_CACHE_SECONDS = 3
+local comboAtSend, lastComboPoints, lastComboAt = nil, nil, 0
+local countedPoints = 0
+
+-- Cast outcomes. UNIT_COMBAT reports a dodge/parry/miss/resist/immune on the target, but not which attack it
+-- belongs to. A cast's own result arrives almost at once (same frame in the logs), so the first outcome on the
+-- target right after a cast decides: a hit means it landed, an avoid means it didn't. A melee auto-attack
+-- avoided in that instant is rare; it makes the addon drop a DoT that landed, which errs low (never a false
+-- kill). Results can also arrive just before the cast event, hence the short look-back.
+local OUTCOME_WINDOW = 0.4
+local OUTCOME_LOOKBACK = 0.25
+local AVOIDED_ACTIONS = {
+    MISS = true, DODGE = true, PARRY = true, EVADE = true, IMMUNE = true, DEFLECT = true, RESIST = true, REFLECT = true,
+}
+local lastBuilder    -- { points, at }: builder whose outcome isn't known yet
+local lastDotCast    -- { key, name, dot, previous, at }: DoT cast whose outcome isn't known yet
+local lastOutcome    -- { avoided, action, at }: most recent outcome on the target
+
+local function describeReading(ok, value)
+    if not ok then return "error" end
+    if value == nil then return "nil" end
+    if isSecret(value) then return "secret" end
+    return tostring(value)
+end
+
+-- Returns the best plain reading (or nil) and a description of what each API returned, for the log.
+local function readComboPoints()
+    local best, parts = nil, {}
+    local function consider(label, ok, points)
+        table.insert(parts, label .. "=" .. describeReading(ok, points))
+        if ok and type(points) == "number" and not isSecret(points) then best = math.max(best or 0, points) end
+    end
+    if GetComboPoints then consider("GetComboPoints", pcall(GetComboPoints, "player", "target")) end
+    if UnitPower and Enum and Enum.PowerType and Enum.PowerType.ComboPoints then
+        consider("UnitPower", pcall(UnitPower, "player", Enum.PowerType.ComboPoints))
+    end
+    return best, table.concat(parts, " ")
+end
+
+local function rememberComboPoints()
+    local points = readComboPoints()
+    if points and points > 0 then lastComboPoints, lastComboAt = points, GetTime() end
+    return points
+end
+
+local function isFinisherDescription(desc)
+    return type(desc) == "string" and not isSecret(desc) and desc:find("Finishing move") ~= nil
+end
+
+local function onCastSent(spellID)
+    local ok, _, desc = pcall(spellNameAndDescription, spellID)
+    if not ok or not isFinisherDescription(desc) then return end
+    local points, readings = readComboPoints()
+    comboAtSend = points
+    trace("COMBO at send: " .. readings .. ", counted=" .. countedPoints)
+end
+
+-- An avoid that arrived just before the cast event (see OUTCOME_LOOKBACK), or nil.
+local function avoidJustBefore()
+    if lastOutcome and lastOutcome.avoided and GetTime() - lastOutcome.at <= OUTCOME_LOOKBACK then
+        return lastOutcome.action
+    end
+end
+
+-- A builder was cast: count its points unless it was already avoided, else wait for its outcome.
+local function onBuilderCast(points)
+    local avoided = avoidJustBefore()
+    if avoided then
+        trace("COMBO builder " .. avoided .. " (before cast event), counted=" .. countedPoints)
+        return
+    end
+    countedPoints = math.min(COMBO_CAP, countedPoints + points)
+    lastBuilder = { points = points, at = GetTime() }
+end
+
+-- A DoT cast whose result was avoided isn't on the target: drop it. (Waiting for a first tick to prove it
+-- instead doesn't work for bleeds: melee white hits look just like ticks.) A recast replaced a DoT that is
+-- still ticking, so that one is put back.
+local function removeAvoidedDot(cast, action)
+    local dots = dotsByTarget[cast.key]
+    if not dots or dots[cast.name] ~= cast.dot then return end
+    if cast.previous then
+        dots[cast.name] = cast.previous
+        trace("AVOID " .. action .. " right after " .. cast.name .. " recast; keeping the earlier one")
+    else
+        dots[cast.name] = nil
+        trace("AVOID " .. action .. " right after " .. cast.name .. "; dropped")
+    end
+end
+
+local function onTargetAvoided(action)
+    local now = GetTime()
+    lastOutcome = { avoided = true, action = action, at = now }
+    if lastBuilder and now - lastBuilder.at <= OUTCOME_WINDOW then
+        countedPoints = math.max(0, countedPoints - lastBuilder.points)
+        trace("COMBO builder " .. action .. ", counted=" .. countedPoints)
+    end
+    if lastDotCast and now - lastDotCast.at <= OUTCOME_WINDOW then
+        removeAvoidedDot(lastDotCast, action)
+    end
+    lastBuilder, lastDotCast = nil, nil
+end
+
+-- A hit on the target: the pending casts landed (a later avoid belongs to something else).
+local function onTargetHit()
+    lastOutcome = { avoided = false, at = GetTime() }
+    lastBuilder, lastDotCast = nil, nil
+end
+
+local function resetComboCount()
+    countedPoints, lastBuilder = 0, nil
+end
+
+local function forgetPendingOutcomes()
+    lastBuilder, lastDotCast, lastOutcome = nil, nil, nil
+end
+
+-- Returns points and where they came from, or nil and "unknown".
+local function comboPointsForCast()
+    local points, source = comboAtSend, "read"
+    if not (points and points > 0) then
+        if lastComboPoints and GetTime() - lastComboAt <= COMBO_CACHE_SECONDS then
+            points, source = lastComboPoints, "cached"
+        elseif countedPoints > 0 then
+            points, source = countedPoints, "counted"
+        else
+            points, source = nil, "unknown"
+        end
+    end
+    comboAtSend = nil
+    resetComboCount()
+    return points, source
+end
+
+-- Returns the target key the DoT was applied to, or nil if the cast wasn't a tracked DoT.
+local function onPlayerCast(spellID)
+    local ok, name, desc = pcall(spellNameAndDescription, spellID)
+    if not ok or not name or isSecret(name) then return end
+    if type(desc) == "string" and not isSecret(desc) then
+        local awarded = tonumber(desc:match("Awards (%d+) combo point"))
+        if awarded then onBuilderCast(awarded) end
+    end
+    if IGNORED_SPELLS[name] then return end
+    local isFinisher = isFinisherDescription(desc)
+    local comboPoints, comboSource
+    if isFinisher then comboPoints, comboSource = comboPointsForCast() end
+    -- Unknown points: parse the lowest entry (errs low), and don't use or teach learned tick sizes.
+    local total, school, duration, statedInterval = parseDot(desc, comboPoints or 1)
+    if not total then return end
+    -- A finisher's tick size depends on the points spent, so learned sizes are kept per point count.
+    local tickKey = spellID
+    if isFinisher then tickKey = comboPoints and (spellID .. "x" .. comboPoints) or nil end
+
+    local key = unitKey("target")
+    if not key then return end
+
+    local now = GetTime()
+    local interval = statedInterval or KNOWN_TICK_INTERVALS[name] or DEFAULT_TICK_INTERVAL
+    school = SCHOOL_BY_NAME[name] or school
+    dotsByTarget[key] = dotsByTarget[key] or {}
+    local previous = dotsByTarget[key][name]
+    dotsByTarget[key][name] = {
+        spellID = spellID,
+        tickKey = tickKey,
+        school = school,
+        total = total,
+        duration = duration,
+        interval = interval,
+        totalTicks = math.max(1, math.floor(duration / interval + 0.5)),
+        appliedAt = now,
+        expiresAt = now + duration,
+        nextTickAt = now + interval,
+        tickSum = 0,        -- non-crit ticks only
+        normalTicks = 0,
+        ticksSeen = 0,      -- including crits
+        missed = 0,
+    }
+    local dot = dotsByTarget[key][name]
+    lastDotCast = { key = key, name = name, dot = dot, previous = previous, at = now }
+    local learned = tickKey and db.ticks[tickKey]
+    -- The starting estimate is shaky without a learned tick size (description numbers leave out spell power
+    -- and attack power) or, for finishers, without knowing the combo points.
+    dot.unsure = not learned
+    trace(string.format("CAST %s (id %d)%s: %d dmg over %ss, school %d, tick every %ss, per-tick %s%s", name, spellID,
+        isFinisher and string.format(" %s combo points (%s)", comboPoints or "?", comboSource) or "",
+        total, duration, school, interval, learned and ("learned " .. learned) or "from description",
+        isWaiting(dot) and ", waiting for first tick" or ""))
+    local avoided = avoidJustBefore()
+    if avoided then
+        removeAvoidedDot(lastDotCast, avoided)
+        lastDotCast = nil
+        return nil
+    end
+    return key, isWaiting(dot)
+end
+
+-- Seconds between now and the nearest expected tick time, and that tick's index. Anchored on the first tick
+-- once seen (ticks keep its rhythm; anchoring on the latest tick would let jitter add up), else on the cast.
+-- Using the nearest multiple of the interval means one missed tick doesn't lose the DoT.
+local function distanceToExpectedTick(dot, now)
+    local anchor = dot.firstTickAt or dot.appliedAt
+    local k = math.max(1, math.floor((now - anchor) / dot.interval + 0.5))
+    return math.abs(now - (anchor + k * dot.interval)), k
+end
+
+local function plausibleTickAmount(dot, amount, isCrit)
+    local known, tolerance
+    if dot.normalTicks > 0 then
+        known, tolerance = dot.tickSum / dot.normalTicks, TICK_AMOUNT_TOLERANCE
+    else
+        known, tolerance = dot.tickKey and db.ticks[dot.tickKey], FIRST_TICK_AMOUNT_TOLERANCE
+    end
+    if not known then return true end
+    if isCrit then
+        return amount >= known * CRIT_MIN_RATIO - 1 and amount <= known * CRIT_MAX_RATIO + 1
+    end
+    return math.abs(amount - known) <= math.max(1, known * tolerance)
+end
+
+-- Returns the target key when this hit was the first tick of a DoT that was waiting for it (so the display
+-- can flash now that the DoT shows), else nil.
+local lastCombatSignature
+local function onUnitCombat(unit, action, flag, amount, school)
+    if isSecret(action) then return end
+    if unit == "target" then
+        if AVOIDED_ACTIONS[action] then return onTargetAvoided(action) end
+        if action == "WOUND" then onTargetHit() end
+    end
+    if action ~= "WOUND" or isSecret(amount) or isSecret(school) or type(amount) ~= "number" then return end
+    local isCrit = not isSecret(flag) and flag == "CRITICAL"
+    local key = unitKey(unit)
+    if not key then return end
+    local dots = dotsByTarget[key]
+    if not dots then return end
+
+    -- The same hit fires for target, nameplateN, softenemy...: handle it once.
+    local now = GetTime()
+    local signature = key .. ":" .. amount .. ":" .. school .. ":" .. now
+    if signature == lastCombatSignature then return end
+    lastCombatSignature = signature
+
+    local best, bestName, bestDistance, bestIndex
+    for name, dot in pairs(dots) do
+        if dot.school == school and plausibleTickAmount(dot, amount, isCrit) then
+            local distance, index = distanceToExpectedTick(dot, now)
+            local window = dot.firstTickAt and TICK_MATCH_WINDOW_ANCHORED or TICK_MATCH_WINDOW
+            -- Each tick slot takes one hit: a second hit near an already-matched tick is someone else's.
+            local freshSlot = not dot.firstTickAt or index > dot.lastTickIndex
+            if freshSlot and distance <= window and (not bestDistance or distance < bestDistance) then
+                best, bestName, bestDistance, bestIndex = dot, name, distance, index
+            end
+        end
+    end
+    if not best then
+        trace(string.format("HIT %d%s school %d on %s not matched to a DoT", amount, isCrit and " (crit)" or "",
+            school, unit))
+        return
+    end
+
+    local wasWaiting = isWaiting(best)
+    best.ticksSeen = best.ticksSeen + 1
+    if not isCrit then
+        best.tickSum = best.tickSum + amount
+        best.normalTicks = best.normalTicks + 1
+        if best.tickKey then
+            db.ticks[best.tickKey] = math.floor(best.tickSum / best.normalTicks * 10 + 0.5) / 10
+        end
+    end
+    best.missed = 0
+    if best.firstTickAt then
+        best.lastTickIndex = bestIndex
+    else
+        best.firstTickAt, best.lastTickIndex = now, 0
+    end
+    best.lastTickAt = now
+    best.nextTickAt = now + best.interval
+    -- Re-anchor expiry on the observed tick: ticks arrive slightly after their nominal time, and an
+    -- expiry based on the cast event would otherwise cut off the final tick.
+    local tickIndex = math.max(1, math.floor((now - best.appliedAt) / best.interval + 0.5))
+    best.expiresAt = now + (best.totalTicks - tickIndex) * best.interval
+    trace(string.format("TICK %s %d%s on %s (tick %d/%d, expecting %.1f/tick)%s", bestName, amount,
+        isCrit and " CRIT" or "", unit, tickIndex, best.totalTicks, expectedTick(best),
+        wasWaiting and ", now shown" or ""))
+    if wasWaiting then return key end
+end
+
+local function housekeep(now)
+    for key, dots in pairs(dotsByTarget) do
+        for name, dot in pairs(dots) do
+            while dot.nextTickAt < now - TICK_MATCH_WINDOW and dot.nextTickAt <= dot.expiresAt do
+                dot.nextTickAt = dot.nextTickAt + dot.interval
+                dot.missed = dot.missed + 1
+            end
+            if now > dot.expiresAt + TICK_MATCH_WINDOW then
+                dots[name] = nil
+                trace("EXPIRE " .. name)
+            elseif dot.ticksSeen == 0 and dot.missed >= MISSED_TICKS_BEFORE_DROP then
+                dots[name] = nil
+                trace("DROP " .. name .. " never ticked (resisted or immune?)")
+            end
+        end
+        if next(dots) == nil then dotsByTarget[key] = nil end
+    end
+end
+
+local function remainingDamage(dot)
+    if dot.nextTickAt > dot.expiresAt + dot.interval / 2 then return 0 end
+    local ticksLeft = math.floor((dot.expiresAt - dot.nextTickAt) / dot.interval + 0.5) + 1
+    return ticksLeft * expectedTick(dot)
+end
+
+-- Returns what the target's DoTs still have to deal, and how many DoTs count toward it (DoTs still waiting
+-- for their first tick are left out).
+local function targetRemainingDamage()
+    local key = unitKey("target")
+    local dots = key and dotsByTarget[key]
+    if not dots then return 0, 0 end
+    local remaining, count = 0, 0
+    for _, dot in pairs(dots) do
+        if not isWaiting(dot) then
+            remaining = remaining + remainingDamage(dot)
+            count = count + 1
+        end
+    end
+    return math.floor(remaining + 0.5), count
+end
+
+---------------------------------------------------------------------------
+-- Display
+---------------------------------------------------------------------------
+
+local WHITE = "Interface\\Buttons\\WHITE8X8"
+local TEXTURE_DIR = "Interface\\AddOns\\DoesItDie\\Textures\\" -- generated by tools/make_textures.py
+
+local SKULL_ICONS = {
+    { id = "skull", label = "Raid skull", path = "Interface\\TargetingFrame\\UI-RaidTargetingIcon_8" },
+    { id = "cross", label = "Red X",      path = "Interface\\RaidFrame\\ReadyCheck-NotReady" },
+    { id = "boss",  label = "Boss skull", path = "Interface\\TargetingFrame\\UI-TargetingFrame-Skull" },
+}
+
+local FILL_STYLES = {
+    { id = "none",     label = "None" },
+    { id = "flat",     label = "Flat",               path = WHITE },
+    { id = "smooth",   label = "Health bar texture", path = "Interface\\TargetingFrame\\UI-StatusBar" },
+    { id = "raid",     label = "Raid bar texture",   path = "Interface\\RaidFrame\\Raid-Bar-Hp-Fill" },
+    { id = "stripes",  label = "Diagonal stripes",   path = TEXTURE_DIR .. "Stripes", tiled = true },
+    { id = "gradient", label = "Fade in from left",  path = WHITE, gradient = true },
+}
+
+local OUTLINE_STYLES = {
+    { id = "dashed", label = "Dashed" },
+    { id = "solid",  label = "Solid" },
+    { id = "none",   label = "None" },
+}
+
+local DASH_LENGTHS = { -- must match tools/make_textures.py
+    { id = 1,  label = "Fine dots (1px)" },
+    { id = 2,  label = "Dots (2px)" },
+    { id = 4,  label = "Short dashes (4px)" },
+    { id = 8,  label = "Dashes (8px)" },
+    { id = 16, label = "Long dashes (16px)" },
+}
+
+local LABEL_POSITIONS = {
+    { id = "left",   label = "Left of the bar" },
+    { id = "center", label = "Centered on the bar" },
+    { id = "right",  label = "Inside the bar, right end" },
+}
+
+local SMOOTH_RATE = 10 -- how fast the marker glides to a new value (higher = snappier)
+
+local function findById(list, id)
+    for _, entry in ipairs(list) do
+        if entry.id == id then return entry end
+    end
+    return list[1]
+end
+
+local function colorOf(id, opacityPercent)
+    local rgb = COLOR_BY_ID[id] or COLOR_BY_ID.white
+    return rgb[1], rgb[2], rgb[3], (opacityPercent or 100) / 100
+end
+
+local healthBar -- nil if the target frame's health bar wasn't found (markers unavailable)
+local skullTestUntil -- /did skull forces the skull visible until this time
+
+-- Skull: addon code can't compare DoT damage with (secret) health, but a StatusBar can. We feed it
+-- max = current health, value = remaining DoT damage; the fill only reaches the bar's right end when
+-- damage >= health. The skull rides the fill's right edge, and only the last skull-width of the very
+-- long bar is visible (clipped), so the skull appears over the portrait only when lethal.
+-- It starts sliding in at skullSize / SKULL_BAR_LENGTH (~0.4%) short of lethal.
+local SKULL_BAR_LENGTH = 10000
+
+local skullWindow = CreateFrame("Frame", "DoesItDieSkull", UIParent)
+skullWindow:SetClipsChildren(true)
+skullWindow:Hide()
+
+local skullBar = CreateFrame("StatusBar", nil, skullWindow)
+skullBar:SetPoint("RIGHT", skullWindow, "RIGHT")
+skullBar:SetStatusBarTexture(WHITE)
+skullBar:SetStatusBarColor(0, 0, 0, 0)
+
+local skull = skullBar:CreateTexture(nil, "OVERLAY")
+skull:SetPoint("RIGHT", skullBar:GetStatusBarTexture(), "RIGHT")
+
+local skullPulse = skull:CreateAnimationGroup()
+skullPulse:SetLooping("BOUNCE")
+local skullPulseAlpha = skullPulse:CreateAnimation("Alpha")
+skullPulseAlpha:SetFromAlpha(1)
+skullPulseAlpha:SetToAlpha(0.45)
+skullPulseAlpha:SetDuration(0.7)
+skullPulseAlpha:SetSmoothing("IN_OUT")
+
+-- /did skull diagnostics: an unclipped skull just above the portrait, to tell a placement/strata
+-- problem apart from a problem with the clipped status-bar trick.
+local plainSkullFrame = CreateFrame("Frame", nil, UIParent)
+plainSkullFrame:SetFrameStrata("HIGH")
+plainSkullFrame:Hide()
+
+local plainSkull = plainSkullFrame:CreateTexture(nil, "OVERLAY")
+plainSkull:SetAllPoints()
+
+-- Damage marker: a StatusBar laid over the whole health bar with max = max health (secret), so it shares
+-- the health bar's scale. Its fill (invisible itself) spans the damage the DoTs still have to deal,
+-- measured from the bar's left edge; the visible fill, outline and flash are drawn on top of that span.
+-- If the green ends inside the marker, the current DoTs will kill the target.
+local remainingBar = CreateFrame("StatusBar", "DoesItDieRemaining", UIParent)
+remainingBar:SetStatusBarTexture(WHITE)
+remainingBar:SetStatusBarColor(0, 0, 0, 0)
+remainingBar:Hide()
+local span = remainingBar:GetStatusBarTexture()
+
+local function coverSpan(texture)
+    texture:SetPoint("TOPLEFT", span, "TOPLEFT")
+    texture:SetPoint("BOTTOMRIGHT", span, "BOTTOMRIGHT")
+end
+
+local fillLayer = CreateFrame("Frame", nil, remainingBar)
+fillLayer:SetAllPoints()
+
+local fillTex = fillLayer:CreateTexture(nil, "ARTWORK")
+coverSpan(fillTex)
+
+local flashTex = fillLayer:CreateTexture(nil, "OVERLAY")
+coverSpan(flashTex)
+flashTex:SetColorTexture(1, 1, 1, 1)
+flashTex:SetBlendMode("ADD")
+flashTex:SetAlpha(0)
+
+local flashAnim = flashTex:CreateAnimationGroup()
+local flashIn = flashAnim:CreateAnimation("Alpha")
+flashIn:SetFromAlpha(0)
+flashIn:SetToAlpha(0.8)
+flashIn:SetDuration(0.08)
+flashIn:SetOrder(1)
+local flashOut = flashAnim:CreateAnimation("Alpha")
+flashOut:SetFromAlpha(0.8)
+flashOut:SetToAlpha(0)
+flashOut:SetDuration(0.5)
+flashOut:SetSmoothing("OUT")
+flashOut:SetOrder(2)
+
+-- The outline tiles its dash texture along each edge, so it works whatever the (secret) span length is.
+local outlineLayer = CreateFrame("Frame", nil, remainingBar)
+outlineLayer:SetAllPoints()
+
+local edges = {} -- { texture, horizontal }
+local function makeEdge(horizontal, point1, point2)
+    local edge = outlineLayer:CreateTexture(nil, "OVERLAY", nil, 7)
+    edge:SetPoint(point1, span, point1)
+    edge:SetPoint(point2, span, point2)
+    table.insert(edges, { texture = edge, horizontal = horizontal })
+end
+makeEdge(true, "TOPLEFT", "TOPRIGHT")
+makeEdge(true, "BOTTOMLEFT", "BOTTOMRIGHT")
+makeEdge(false, "TOPLEFT", "BOTTOMLEFT")
+makeEdge(false, "TOPRIGHT", "BOTTOMRIGHT")
+
+local outlinePulse = outlineLayer:CreateAnimationGroup()
+outlinePulse:SetLooping("BOUNCE")
+local outlinePulseAlpha = outlinePulse:CreateAnimation("Alpha")
+outlinePulseAlpha:SetFromAlpha(1)
+outlinePulseAlpha:SetToAlpha(0.3)
+outlinePulseAlpha:SetDuration(0.9)
+outlinePulseAlpha:SetSmoothing("IN_OUT")
+
+-- Glow: soft halo around the span in the outline color, one gradient strip per side fading outward.
+-- Lives on the outline layer so "Pulse outline" pulses it too.
+local glows = {} -- { texture, side }
+local function makeGlow(side)
+    local glow = outlineLayer:CreateTexture(nil, "BORDER")
+    glow:SetTexture(WHITE)
+    glow:SetBlendMode("ADD")
+    if side == "top" then
+        glow:SetPoint("BOTTOMLEFT", span, "TOPLEFT")
+        glow:SetPoint("BOTTOMRIGHT", span, "TOPRIGHT")
+    elseif side == "bottom" then
+        glow:SetPoint("TOPLEFT", span, "BOTTOMLEFT")
+        glow:SetPoint("TOPRIGHT", span, "BOTTOMRIGHT")
+    elseif side == "left" then
+        glow:SetPoint("TOPRIGHT", span, "TOPLEFT")
+        glow:SetPoint("BOTTOMRIGHT", span, "BOTTOMLEFT")
+    else
+        glow:SetPoint("TOPLEFT", span, "TOPRIGHT")
+        glow:SetPoint("BOTTOMLEFT", span, "BOTTOMRIGHT")
+    end
+    table.insert(glows, { texture = glow, side = side })
+end
+makeGlow("top")
+makeGlow("bottom")
+makeGlow("left")
+makeGlow("right")
+
+-- Clipped to the span: effects that move across the whole health bar but should only show inside the
+-- marker (scrolling stripes, the shine sweep). Clipping does the work Lua can't, since the span's width
+-- comes from secret health.
+local clipLayer = CreateFrame("Frame", nil, remainingBar)
+clipLayer:SetPoint("TOPLEFT", span, "TOPLEFT")
+clipLayer:SetPoint("BOTTOMRIGHT", span, "BOTTOMRIGHT")
+clipLayer:SetClipsChildren(true)
+
+local STRIPE_SCROLL_PERIOD = 8 -- px; the stripe pattern repeats every 8px horizontally (make_textures.py)
+
+local scrollingStripes = clipLayer:CreateTexture(nil, "ARTWORK")
+scrollingStripes:SetTexture(TEXTURE_DIR .. "Stripes", "REPEAT", "REPEAT")
+scrollingStripes:SetHorizTile(true)
+scrollingStripes:SetVertTile(true)
+local stripeScroll = scrollingStripes:CreateAnimationGroup()
+stripeScroll:SetLooping("REPEAT")
+local stripeMove = stripeScroll:CreateAnimation("Translation")
+stripeMove:SetOffset(STRIPE_SCROLL_PERIOD, 0)
+stripeMove:SetDuration(0.6)
+
+local SHINE_WIDTH = 36
+local SHINE_DURATION = 0.9
+
+local shine = clipLayer:CreateTexture(nil, "OVERLAY")
+shine:SetTexture(TEXTURE_DIR .. "Shine")
+shine:SetBlendMode("ADD")
+shine:SetWidth(SHINE_WIDTH)
+local shineSweep = shine:CreateAnimationGroup()
+shineSweep:SetLooping("REPEAT")
+local shineMove = shineSweep:CreateAnimation("Translation")
+shineMove:SetDuration(SHINE_DURATION)
+shineMove:SetSmoothing("IN_OUT")
+
+-- Spark: bright flare on the span's right end that only appears when a DoT lands (a constant glow there
+-- hides exactly the edge you need to read). Invisible at rest; the punch animation fades it in and out.
+local sparkLayer = CreateFrame("Frame", nil, remainingBar)
+sparkLayer:SetAllPoints()
+
+local spark = sparkLayer:CreateTexture(nil, "OVERLAY")
+spark:SetTexture(TEXTURE_DIR .. "Spark")
+spark:SetBlendMode("ADD")
+spark:SetWidth(14)
+spark:SetPoint("TOP", span, "TOPRIGHT", 0, 7)
+spark:SetPoint("BOTTOM", span, "BOTTOMRIGHT", 0, -7)
+spark:SetAlpha(0)
+
+-- Scale animations use SetScaleFrom/To on current clients; SetScale (relative) on older ones.
+local function scaleStep(group, fromX, fromY, toX, toY, duration, order, smoothing)
+    local anim = group:CreateAnimation("Scale")
+    if anim.SetScaleFrom then
+        anim:SetScaleFrom(fromX, fromY)
+        anim:SetScaleTo(toX, toY)
+    else
+        anim:SetScale(toX / fromX, toY / fromY)
+    end
+    anim:SetDuration(duration)
+    anim:SetOrder(order)
+    if smoothing then anim:SetSmoothing(smoothing) end
+end
+
+local function alphaStep(group, from, to, duration, order, smoothing)
+    local anim = group:CreateAnimation("Alpha")
+    anim:SetFromAlpha(from)
+    anim:SetToAlpha(to)
+    anim:SetDuration(duration)
+    anim:SetOrder(order)
+    if smoothing then anim:SetSmoothing(smoothing) end
+end
+
+local sparkPunch = spark:CreateAnimationGroup()
+scaleStep(sparkPunch, 1, 1, 1.9, 1.3, 0.08, 1)
+alphaStep(sparkPunch, 0, 1, 0.08, 1)
+scaleStep(sparkPunch, 1.9, 1.3, 1, 1, 0.45, 2, "OUT")
+alphaStep(sparkPunch, 1, 0, 0.45, 2, "OUT")
+
+local label = remainingBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+
+-- Pushes the options onto the widgets, but only when one of them changed since the last call, so it
+-- can run on every refresh and option changes still show up immediately.
+local APPEARANCE_KEYS = {
+    "showMarkers", "skullIcon", "skullSize", "skullPulse", "skullOffsetX", "skullOffsetY",
+    "showSpark", "showGlow", "glowSize", "showShine", "shineInterval", "scrollStripes",
+    "fillTexture", "fillColor", "fillOpacity",
+    "outlineStyle", "dashLength", "outlineThickness", "outlineColor", "outlineOpacity", "pulseOutline",
+    "showLabel", "labelSize", "labelColor", "labelPosition",
+}
+local appliedSignature
+local skullAnchor -- what the skull is centered on (portrait, else target frame, else screen)
+
+local function positionSkull()
+    skullWindow:ClearAllPoints()
+    if skullAnchor == UIParent then
+        skullWindow:SetPoint("CENTER", UIParent, "CENTER", db.skullOffsetX, 120 + db.skullOffsetY)
+    elseif skullAnchor then
+        skullWindow:SetPoint("CENTER", skullAnchor, "CENTER", db.skullOffsetX, db.skullOffsetY)
+    end
+end
+
+-- Width of the health bar for the shine sweep; layout values are plain, but guard in case they aren't.
+local function healthBarWidth()
+    local ok, width = pcall(healthBar.GetWidth, healthBar)
+    if ok and not isSecret(width) and type(width) == "number" and width > 0 then return width end
+    return 150
+end
+
+local function applyAppearance()
+    local parts = {}
+    for i, key in ipairs(APPEARANCE_KEYS) do parts[i] = tostring(db[key]) end
+    local signature = table.concat(parts, "|")
+    if signature == appliedSignature then return end
+    appliedSignature = signature
+
+    -- Skull
+    local size = db.skullSize
+    skullWindow:SetSize(size, size)
+    skullBar:SetSize(SKULL_BAR_LENGTH, size)
+    skull:SetSize(size, size)
+    plainSkullFrame:SetSize(size, size)
+    local icon = findById(SKULL_ICONS, db.skullIcon).path
+    skull:SetTexture(icon)
+    plainSkull:SetTexture(icon)
+    if db.skullPulse then skullPulse:Play() else skullPulse:Stop() end
+    positionSkull()
+
+    -- Fill (stripes can scroll: then they're drawn by the clipped, animated texture instead)
+    local fill = findById(FILL_STYLES, db.fillTexture)
+    local scrolling = fill.id == "stripes" and db.scrollStripes and healthBar ~= nil
+    if scrolling then
+        fillTex:Hide()
+        scrollingStripes:ClearAllPoints()
+        scrollingStripes:SetPoint("TOPLEFT", healthBar, "TOPLEFT", -STRIPE_SCROLL_PERIOD * 2, 0)
+        scrollingStripes:SetPoint("BOTTOMRIGHT", healthBar, "BOTTOMRIGHT")
+        scrollingStripes:SetVertexColor(colorOf(db.fillColor, db.fillOpacity))
+        scrollingStripes:Show()
+        stripeScroll:Play()
+    else
+        stripeScroll:Stop()
+        scrollingStripes:Hide()
+    end
+    if fill.path and not scrolling then
+        local r, g, b, a = colorOf(db.fillColor, db.fillOpacity)
+        fillTex:SetTexture(fill.path, fill.tiled and "REPEAT" or nil, fill.tiled and "REPEAT" or nil)
+        fillTex:SetHorizTile(fill.tiled or false)
+        fillTex:SetVertTile(fill.tiled or false)
+        if fill.gradient and CreateColor then
+            fillTex:SetVertexColor(1, 1, 1, 1)
+            fillTex:SetGradient("HORIZONTAL", CreateColor(r, g, b, 0), CreateColor(r, g, b, a))
+        else
+            fillTex:SetVertexColor(r, g, b, a)
+        end
+        fillTex:Show()
+    else
+        fillTex:Hide()
+    end
+
+    -- Outline
+    local r, g, b, a = colorOf(db.outlineColor, db.outlineOpacity)
+    for _, edge in ipairs(edges) do
+        local texture = edge.texture
+        if db.outlineStyle == "dashed" then
+            local file = (edge.horizontal and "DashH" or "DashV") .. db.dashLength
+            texture:SetTexture(TEXTURE_DIR .. file, "REPEAT", "REPEAT")
+            texture:SetHorizTile(edge.horizontal)
+            texture:SetVertTile(not edge.horizontal)
+        else
+            texture:SetTexture(WHITE)
+            texture:SetHorizTile(false)
+            texture:SetVertTile(false)
+        end
+        texture:SetVertexColor(r, g, b, a)
+        if edge.horizontal then
+            texture:SetHeight(db.outlineThickness)
+        else
+            texture:SetWidth(db.outlineThickness)
+        end
+        texture:SetShown(db.outlineStyle ~= "none")
+    end
+    if db.pulseOutline then outlinePulse:Play() else outlinePulse:Stop() end
+
+    -- Glow (outline color, fading outward)
+    local glowAlpha = a * 0.7
+    for _, glow in ipairs(glows) do
+        local texture = glow.texture
+        local inner, outer = CreateColor(r, g, b, glowAlpha), CreateColor(r, g, b, 0)
+        if glow.side == "top" then
+            texture:SetHeight(db.glowSize)
+            texture:SetGradient("VERTICAL", inner, outer)
+        elseif glow.side == "bottom" then
+            texture:SetHeight(db.glowSize)
+            texture:SetGradient("VERTICAL", outer, inner)
+        elseif glow.side == "left" then
+            texture:SetWidth(db.glowSize)
+            texture:SetGradient("HORIZONTAL", outer, inner)
+        else
+            texture:SetWidth(db.glowSize)
+            texture:SetGradient("HORIZONTAL", inner, outer)
+        end
+        texture:SetShown(db.showGlow)
+    end
+
+    -- Spark (outline color, brightened)
+    spark:SetVertexColor(math.min(1, r + 0.4), math.min(1, g + 0.4), math.min(1, b + 0.4), 1)
+    spark:SetShown(db.showSpark)
+
+    -- Shine sweep: starts just left of the bar, crosses it, then waits out the rest of the interval.
+    shineSweep:Stop()
+    if db.showShine and healthBar then
+        shine:ClearAllPoints()
+        shine:SetPoint("TOPRIGHT", healthBar, "TOPLEFT")
+        shine:SetPoint("BOTTOMRIGHT", healthBar, "BOTTOMLEFT")
+        shineMove:SetOffset(healthBarWidth() + SHINE_WIDTH, 0)
+        shineMove:SetStartDelay(math.max(0, db.shineInterval - SHINE_DURATION))
+        shine:Show()
+        shineSweep:Play()
+    else
+        shine:Hide()
+    end
+
+    fillLayer:SetShown(db.showMarkers)
+    clipLayer:SetShown(db.showMarkers)
+    outlineLayer:SetShown(db.showMarkers)
+    sparkLayer:SetShown(db.showMarkers)
+
+    -- Text
+    local fontPath = GameFontNormalSmall:GetFont()
+    label:SetFont(fontPath, db.labelSize, "OUTLINE")
+    label:SetTextColor(colorOf(db.labelColor))
+    label:ClearAllPoints()
+    if healthBar then
+        if db.labelPosition == "center" then
+            label:SetPoint("CENTER", healthBar, "CENTER")
+        elseif db.labelPosition == "right" then
+            label:SetPoint("RIGHT", healthBar, "RIGHT", -4, 0)
+        else
+            label:SetPoint("RIGHT", healthBar, "LEFT", -6, 0)
+        end
+    end
+    label:SetShown(db.showLabel)
+end
+
+-- Smooth motion: the marker glides toward its value instead of jumping on each tick, and grows in from
+-- zero when it first appears or switches target. Values are ours (plain), only the scale is secret.
+local markerValue, markerShownValue, markerScale = 0, 0, nil
+
+local function setMarkerValue(value, scale)
+    if scale ~= markerScale then
+        markerScale = scale
+        markerShownValue = db.smoothMotion and 0 or value
+    end
+    markerValue = value
+    if not db.smoothMotion then markerShownValue = value end
+    remainingBar:SetValue(markerShownValue)
+end
+
+local function animateMarker(elapsed)
+    if markerShownValue == markerValue or not remainingBar:IsShown() then return end
+    markerShownValue = markerShownValue + (markerValue - markerShownValue) * math.min(1, elapsed * SMOOTH_RATE)
+    if math.abs(markerValue - markerShownValue) < math.max(0.05, math.abs(markerValue) * 0.002) then
+        markerShownValue = markerValue
+    end
+    remainingBar:SetValue(markerShownValue)
+end
+
+local function playFlash()
+    if db.flashOnApply and db.showMarkers and remainingBar:IsShown() then
+        flashAnim:Stop()
+        flashAnim:Play()
+        if db.showSpark then
+            sparkPunch:Stop()
+            sparkPunch:Play()
+        end
+    end
+end
+
+local function findTargetPortrait()
+    local tf = TargetFrame
+    return (tf and tf.TargetFrameContainer and tf.TargetFrameContainer.Portrait)
+        or TargetFramePortrait
+        or (tf and tf.portrait)
+end
+
+local function findTargetHealthBar()
+    local tf = TargetFrame
+    local main = tf and tf.TargetFrameContent and tf.TargetFrameContent.TargetFrameContentMain
+    return (main and main.HealthBarsContainer and main.HealthBarsContainer.HealthBar)
+        or (main and main.HealthBar)
+        or TargetFrameHealthBar
+        or (tf and tf.healthbar)
+end
+
+local function regionName(region)
+    if not region then return "not found" end
+    local ok, name = pcall(region.GetDebugName, region)
+    return ok and tostring(name) or "found (unnamed)"
+end
+
+local function attach()
+    local portrait = findTargetPortrait()
+    skullAnchor = portrait or TargetFrame or UIParent
+    plainSkullFrame:ClearAllPoints()
+    plainSkullFrame:SetPoint("BOTTOM", skullWindow, "TOP", 0, 4)
+
+    healthBar = findTargetHealthBar()
+    if healthBar then
+        remainingBar:ClearAllPoints()
+        remainingBar:SetAllPoints(healthBar)
+    end
+    appliedSignature = nil -- re-anchor the skull, label and effects against the (new) frames
+    trace("ATTACH portrait: " .. regionName(portrait) .. " | health bar: " .. regionName(healthBar))
+    return portrait ~= nil
+end
+
+local STRATA_RANK = {
+    BACKGROUND = 1, LOW = 2, MEDIUM = 3, HIGH = 4, DIALOG = 5, FULLSCREEN = 6, FULLSCREEN_DIALOG = 7, TOOLTIP = 8,
+}
+local LAYER_CHECK_INTERVAL = 1
+
+-- Highest strata/level anywhere in the target frame's tree. Blizzard (Edit Mode) re-layers the target
+-- frame after addons load, so a level picked once at load ends up underneath the health bar and portrait.
+local function targetFrameTopLayer()
+    local topStrata, topLevel = "BACKGROUND", 0
+    local function visit(frame, depth)
+        -- Some of Blizzard's frames report a secret strata/level in Forever; those can't be compared, so skip
+        -- them (their children are still visited).
+        local strata, level = frame:GetFrameStrata(), frame:GetFrameLevel()
+        if not isSecret(strata) and not isSecret(level) then
+            local rank, topRank = STRATA_RANK[strata] or 0, STRATA_RANK[topStrata] or 0
+            if rank > topRank then
+                topStrata, topLevel = strata, level
+            elseif rank == topRank and level > topLevel then
+                topLevel = level
+            end
+        end
+        if depth < 6 then
+            for _, child in ipairs({ frame:GetChildren() }) do visit(child, depth + 1) end
+        end
+    end
+    visit(TargetFrame or healthBar or UIParent, 0)
+    return topStrata, topLevel
+end
+
+-- Keeps our marker and skull above everything on the target frame. Checked while displaying (throttled)
+-- because Blizzard can re-layer the frame at any time.
+local layerCheckedAt, lastStrata, lastLevel, layerErrorLogged = 0, nil, nil, false
+local function updateLayering(now)
+    if now - layerCheckedAt < LAYER_CHECK_INTERVAL then return end
+    layerCheckedAt = now
+    local ok, strata, level = pcall(targetFrameTopLayer)
+    if not ok then
+        if not layerErrorLogged then
+            layerErrorLogged = true
+            trace("LAYER check failed (logged once): " .. tostring(strata))
+        end
+        return
+    end
+    for i, frame in ipairs({ remainingBar, fillLayer, clipLayer, outlineLayer, sparkLayer, skullWindow, skullBar }) do
+        frame:SetFrameStrata(strata)
+        frame:SetFrameLevel(level + i)
+    end
+    if strata ~= lastStrata or level ~= lastLevel then
+        lastStrata, lastLevel = strata, level
+        trace(string.format("LAYER target frame top is %s/%d; marker and skull placed above it", strata, level))
+    end
+end
+
+local function hideMarkers()
+    remainingBar:Hide()
+    markerScale = nil -- grow in again next time it appears
+end
+
+local function hideAll()
+    skullWindow:Hide()
+    hideMarkers()
+end
+
+-- The label lives on the marker bar, so the bar stays up if either is wanted.
+local function showMarkers()
+    if db.showMarkers or db.showLabel then
+        remainingBar:Show()
+    else
+        hideMarkers()
+    end
+end
+
+local function rectOf(region)
+    if not region then return "nil" end
+    local ok, left, bottom, width, height = pcall(region.GetRect, region)
+    if not ok then return "error" end
+    if left == nil then return "no rect" end
+    if isSecret(left) or isSecret(width) then return "secret" end
+    return string.format("%.0f,%.0f %.0fx%.0f", left, bottom, width, height)
+end
+
+local function describeFrame(frame)
+    local ok, strata, level, visible = pcall(function()
+        return frame:GetFrameStrata(), frame:GetFrameLevel(), frame:IsVisible()
+    end)
+    if not ok then return "error" end
+    return string.format("%s %s/%d visible=%s", rectOf(frame), tostring(strata), level, tostring(visible))
+end
+
+local function traceSkullGeometry()
+    local portrait = findTargetPortrait()
+    trace("SKULLTEST portrait " .. rectOf(portrait) .. " | TargetFrame " .. (TargetFrame and describeFrame(TargetFrame) or "nil"))
+    local clipsOK, clips = pcall(skullWindow.DoesClipChildren, skullWindow)
+    trace("SKULLTEST window " .. describeFrame(skullWindow) .. " clips=" .. (clipsOK and tostring(clips) or "unknown"))
+    trace("SKULLTEST bar " .. describeFrame(skullBar) .. " fill " .. rectOf(skullBar:GetStatusBarTexture()))
+    trace("SKULLTEST skull " .. rectOf(skull) .. " visible=" .. tostring(skull:IsVisible()) .. " texture=" .. tostring(skull:GetTexture()))
+    trace("SKULLTEST plain " .. describeFrame(plainSkullFrame) .. " texture=" .. tostring(plainSkull:GetTexture()))
+end
+
+local function targetIsDead()
+    local ok, dead = pcall(UnitIsDead, "target")
+    return ok and not isSecret(dead) and dead
+end
+
+local updateErrorShown = false
+local lastTracedDamage
+local function refresh()
+    local now = GetTime()
+    housekeep(now)
+    updateLayering(now)
+    applyAppearance()
+
+    if skullTestUntil and now < skullTestUntil then
+        skullBar:SetMinMaxValues(0, 1)
+        skullBar:SetValue(1)
+        skullWindow:Show()
+        plainSkullFrame:Show()
+        return
+    end
+    plainSkullFrame:Hide()
+
+    -- Preview (options panel): marker and skull on any target, so the look can be tuned out of combat.
+    -- Target health is secret, so the preview fill is a % of the bar's full width, and the skull shows at
+    -- 100% (a kill on a full-health target). Both go through the same widgets as the real display.
+    if db.preview and healthBar and UnitExists("target") then
+        local percent = db.previewPercent
+        skullBar:SetMinMaxValues(0, 100)
+        skullBar:SetValue(percent)
+        skullWindow:SetShown(db.showSkull)
+        remainingBar:SetMinMaxValues(0, 100)
+        setMarkerValue(percent, "preview")
+        label:SetText(string.format("DoTs: preview %d%%", percent))
+        showMarkers()
+        return
+    end
+
+    if not UnitExists("target") or targetIsDead() then return hideAll() end
+    local damage, count = targetRemainingDamage()
+    if damage ~= lastTracedDamage then
+        lastTracedDamage = damage
+        trace(string.format("ESTIMATE %d remaining from %d DoT(s)", damage, count))
+    end
+    if count == 0 then return hideAll() end
+
+    local ok, err = pcall(function()
+        skullBar:SetMinMaxValues(0, UnitHealth("target"))
+        skullBar:SetValue(damage)
+        if healthBar then
+            remainingBar:SetMinMaxValues(0, UnitHealthMax("target"))
+            setMarkerValue(damage, unitKey("target"))
+        end
+    end)
+    if not ok then
+        if not updateErrorShown then
+            updateErrorShown = true
+            print("Display update failed: " .. tostring(err))
+        end
+        return hideAll()
+    end
+
+    skullWindow:SetShown(db.showSkull)
+    if healthBar then
+        label:SetText(string.format("DoTs: %d", damage))
+        showMarkers()
+    else
+        hideMarkers()
+    end
+end
+
+---------------------------------------------------------------------------
+-- Options panel (Options > AddOns > DoesItDie, or /did)
+---------------------------------------------------------------------------
+
+local optionsCategory
+
+local function applyDefaults()
+    -- Settings from earlier versions.
+    if db.showMarkers == nil and db.showLine ~= nil then db.showMarkers = db.showLine end
+    db.showLine, db.showRemaining = nil, nil
+    db.showFullLine, db.lineThickness, db.lineColor = nil, nil, nil
+    for key, value in pairs(DEFAULTS) do
+        if db[key] == nil then db[key] = value end
+    end
+end
+
+local function registerOptions()
+    local category, layout = Settings.RegisterVerticalLayoutCategory("DoesItDie")
+
+    local function addSetting(key, name, varType)
+        return Settings.RegisterAddOnSetting(category, "DOESITDIE_" .. string.upper(key), key, db, varType,
+            name, DEFAULTS[key])
+    end
+    local function header(text)
+        pcall(function() layout:AddInitializer(CreateSettingsListSectionHeaderInitializer(text)) end)
+    end
+    local function button(name, buttonText, onClick, tooltip)
+        pcall(function()
+            layout:AddInitializer(CreateSettingsButtonInitializer(name, buttonText, onClick, tooltip, true))
+        end)
+    end
+    local function checkbox(key, name, tooltip)
+        Settings.CreateCheckbox(category, addSetting(key, name, Settings.VarType.Boolean), tooltip)
+    end
+    local function slider(key, name, min, max, step, tooltip)
+        local options = Settings.CreateSliderOptions(min, max, step)
+        if MinimalSliderWithSteppersMixin then
+            options:SetLabelFormatter(MinimalSliderWithSteppersMixin.Label.Right)
+        end
+        Settings.CreateSlider(category, addSetting(key, name, Settings.VarType.Number), options, tooltip)
+    end
+    local function dropdown(key, name, list, tooltip)
+        local varType = type(list[1].id) == "number" and Settings.VarType.Number or Settings.VarType.String
+        local function getOptions()
+            local container = Settings.CreateControlTextContainer()
+            for _, entry in ipairs(list) do container:Add(entry.id, entry.label) end
+            return container:GetData()
+        end
+        local createDropdown = Settings.CreateDropdown or Settings.CreateDropDown
+        createDropdown(category, addSetting(key, name, varType), getOptions, tooltip)
+    end
+
+    header("Preview")
+    checkbox("preview", "Preview on current target",
+        "Draws the marker and skull on your target so you can tune the look without fighting. "
+            .. "Turns itself off when you reload.")
+    checkbox("previewOffInCombat", "Turn off preview in combat",
+        "Entering combat switches the preview off so the real marker takes over.")
+    slider("previewPercent", "Preview fill %", 0, 100, 5,
+        "How much of the health bar the preview marker covers. The skull appears at 100%.")
+    button("Flash", "Test", playFlash, "Plays the new-DoT flash (needs the marker visible, e.g. preview on).")
+
+    header("Skull")
+    checkbox("showSkull", "Show skull on target portrait",
+        "Shows an icon over the target's portrait when your DoTs on it will kill it.")
+    dropdown("skullIcon", "Icon", SKULL_ICONS)
+    slider("skullSize", "Size", 20, 64, 2)
+    checkbox("skullPulse", "Pulse", "Gently pulses the icon while it's showing.")
+    slider("skullOffsetX", "Horizontal offset", -60, 60, 1, "Pixels right (+) or left (-) of the portrait's center.")
+    slider("skullOffsetY", "Vertical offset", -60, 60, 1, "Pixels up (+) or down (-) from the portrait's center.")
+
+    header("Damage marker")
+    checkbox("showMarkers", "Show damage marker",
+        "Marks the damage your DoTs still have to deal on the target's health bar. "
+            .. "If the health ends inside it, the target dies.")
+    dropdown("waitFirstTick", "Wait for first tick", WAIT_MODES,
+        "Whether a new DoT counts toward the marker (and skull) before its first tick lands. "
+            .. "\"When unsure\" waits only when the starting estimate is shaky: a finisher with unknown combo points, "
+            .. "or a spell the addon hasn't seen tick yet.")
+    dropdown("fillTexture", "Fill style", FILL_STYLES)
+    dropdown("fillColor", "Fill color", COLOR_PRESETS)
+    slider("fillOpacity", "Fill opacity %", 0, 100, 5)
+    dropdown("outlineStyle", "Outline style", OUTLINE_STYLES)
+    dropdown("dashLength", "Dash length", DASH_LENGTHS, "Length of each dash and of the gap between them.")
+    slider("outlineThickness", "Outline thickness", 1, 8, 1)
+    dropdown("outlineColor", "Outline color", COLOR_PRESETS)
+    slider("outlineOpacity", "Outline opacity %", 10, 100, 5)
+
+    header("Animation")
+    checkbox("smoothMotion", "Smooth motion",
+        "The marker grows in when it appears and glides to new values instead of jumping on each tick.")
+    checkbox("flashOnApply", "Flash on new DoT",
+        "Flashes the marker when you apply a DoT to your target (or, for a DoT waiting for its first tick, when "
+            .. "that tick lands).")
+    checkbox("pulseOutline", "Pulse outline", "Slowly pulses the outline (and glow) so it stands out on busy backgrounds.")
+
+    header("Effects")
+    checkbox("showSpark", "Spark", "A bright flare on the marker's leading edge when a DoT lands. Hidden otherwise.")
+    checkbox("showGlow", "Glow", "Soft halo around the marker in the outline color.")
+    slider("glowSize", "Glow size", 2, 16, 1)
+    checkbox("showShine", "Shine sweep", "A light streak runs across the marker every few seconds.")
+    slider("shineInterval", "Shine every (seconds)", 2, 10, 1)
+    checkbox("scrollStripes", "Scroll stripes", "Animates the \"Diagonal stripes\" fill style like a barber pole.")
+
+    header("Damage text")
+    checkbox("showLabel", "Show damage text", "\"DoTs: remaining damage\" next to the health bar.")
+    dropdown("labelPosition", "Position", LABEL_POSITIONS)
+    slider("labelSize", "Size", 8, 20, 1)
+    dropdown("labelColor", "Color", COLOR_PRESETS)
+
+    header("Troubleshooting")
+    checkbox("debug", "Echo trace log to chat", "Prints each DoT cast, matched tick and estimate to chat.")
+    button("Learned tick sizes", "Reset", function()
+        wipe(db.ticks)
+        print("Learned tick sizes cleared.")
+    end, "Forget the tick sizes learned from earlier casts.")
+
+    Settings.RegisterAddOnCategory(category)
+    optionsCategory = category
+end
+
+local function openOptions()
+    if optionsCategory then
+        Settings.OpenToCategory(optionsCategory:GetID())
+    else
+        print("Options panel unavailable in this client; see /did help.")
+    end
+end
+
+---------------------------------------------------------------------------
+-- Events
+---------------------------------------------------------------------------
+
+local frame = CreateFrame("Frame")
+frame:RegisterEvent("ADDON_LOADED")
+frame:RegisterEvent("PLAYER_TARGET_CHANGED")
+frame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
+frame:RegisterUnitEvent("UNIT_SPELLCAST_SENT", "player")   -- combo points, before a finisher spends them
+frame:RegisterUnitEvent("UNIT_POWER_FREQUENT", "player")   -- keeps a recent combo point reading as backup
+frame:RegisterEvent("UNIT_COMBAT")
+frame:RegisterEvent("PLAYER_REGEN_DISABLED")
+-- Never register COMBAT_LOG_EVENT_UNFILTERED: Forever forbids it and shows a "blocked" popup.
+
+-- Turns the preview off through the settings system when possible, so an open options panel updates too.
+local function stopPreview()
+    local ok = pcall(function() Settings.GetSetting("DOESITDIE_PREVIEW"):SetValue(false) end)
+    if not ok then db.preview = false end
+end
+
+frame:SetScript("OnEvent", function(self, event, ...)
+    if event == "ADDON_LOADED" then
+        if ... ~= ADDON_NAME then return end
+        DoesItDieDB = DoesItDieDB or {}
+        db = DoesItDieDB
+        if db.version ~= DB_VERSION then
+            db.ticks, db.intervals, db.version = nil, nil, DB_VERSION
+        end
+        db.ticks = db.ticks or {}
+        db.log = db.log or {}
+        applyDefaults()
+        db.preview = false
+        trace("===== session start =====")
+        local ok, err = pcall(registerOptions)
+        if not ok then
+            trace("Options panel registration failed: " .. tostring(err))
+            print("Couldn't create the options panel; slash commands still work (/did help).")
+        end
+        if not attach() then print("Target portrait not found; skull shown beside the target frame.") end
+        self:UnregisterEvent("ADDON_LOADED")
+
+    elseif not db then
+        return
+
+    elseif event == "PLAYER_TARGET_CHANGED" then
+        dotsByTarget.target = nil -- only used when the target's GUID is secret
+        resetComboCount() -- combo points belong to the target they were built on
+        forgetPendingOutcomes()
+        lastTracedDamage = nil
+        trace("TARGET changed to " .. (unitKey("target") or "none"))
+        refresh()
+
+    elseif event == "UNIT_SPELLCAST_SENT" then
+        local _, _, _, spellID = ...
+        onCastSent(spellID)
+
+    elseif event == "UNIT_POWER_FREQUENT" then
+        local _, powerType = ...
+        if not isSecret(powerType) and powerType == "COMBO_POINTS" then rememberComboPoints() end
+
+    elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
+        local _, _, spellID = ...
+        local appliedTo, waiting = onPlayerCast(spellID)
+        refresh()
+        -- A DoT waiting for its first tick isn't drawn yet; it flashes when that tick lands instead.
+        if appliedTo and not waiting and appliedTo == unitKey("target") then playFlash() end
+
+    elseif event == "UNIT_COMBAT" then
+        local revealed = onUnitCombat(...)
+        if revealed and revealed == unitKey("target") then
+            refresh()
+            playFlash()
+        end
+
+    elseif event == "PLAYER_REGEN_DISABLED" then
+        if db.preview and db.previewOffInCombat then
+            stopPreview()
+            print("Preview turned off (entered combat).")
+            refresh()
+        end
+    end
+end)
+
+local sinceUpdate = 0
+frame:SetScript("OnUpdate", function(self, elapsed)
+    if db then animateMarker(elapsed) end
+    sinceUpdate = sinceUpdate + elapsed
+    if sinceUpdate < UPDATE_INTERVAL or not db then return end
+    sinceUpdate = 0
+    refresh()
+end)
+
+---------------------------------------------------------------------------
+-- Slash commands
+---------------------------------------------------------------------------
+
+SLASH_DOESITDIE1 = "/did"
+SLASH_DOESITDIE2 = "/doesitdie"
+SlashCmdList.DOESITDIE = function(msg)
+    local cmd = strlower(strtrim(msg or ""))
+    if cmd == "" or cmd == "options" or cmd == "config" then
+        openOptions()
+    elseif cmd == "line" then
+        db.showMarkers = not db.showMarkers
+        if db.showMarkers and not healthBar then
+            print("Target frame health bar not found; health bar markers unavailable.")
+        else
+            print("Health bar markers " .. (db.showMarkers and "ON" or "OFF") .. ".")
+        end
+    elseif cmd == "skull" then
+        skullTestUntil = GetTime() + 5
+        print("Skull test for 5 seconds: one skull ON the portrait (the real one) and one ABOVE it (plain test).")
+        C_Timer.After(0.5, traceSkullGeometry)
+    elseif cmd == "debug" then
+        db.debug = not db.debug
+        print("Debug " .. (db.debug and "ON" or "OFF") .. ".")
+    elseif cmd == "reset" then
+        wipe(db.ticks)
+        print("Learned tick sizes cleared.")
+    else
+        print("A skull on the target's portrait means your DoTs will kill it.")
+        print("/did - open the options panel")
+        print("/did line - toggle health bar markers on/off")
+        print("/did skull - show the skull for 5 seconds to check its position")
+        print("/did debug - toggle echoing the trace log (casts, ticks, estimates) to chat")
+        print("/did reset - forget learned tick sizes")
+    end
+end

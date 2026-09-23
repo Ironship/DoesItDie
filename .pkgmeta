@@ -1,0 +1,11 @@
+package-as: DoesItDie
+
+# The addon lives in a subfolder; lift it to the zip root.
+move-folders:
+    DoesItDie/DoesItDie: DoesItDie
+
+# Dev-only folders stay out of the release zip.
+ignore:
+    - WillItDieProbe
+    - tools
+    - README.md

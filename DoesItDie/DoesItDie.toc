@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: DoesItDie
+## Notes: Tracks your DoTs and marks the damage they still have left on your target's health bar, with a skull on the portrait when they'll finish it off. Fully customizable look (/did).
+## Author: Joe Greive
+## Version: @project-version@
+## SavedVariables: DoesItDieDB
+
+DoesItDie.lua
