@@ -4,5 +4,6 @@
 ## Author: Joe Greive
 ## Version: @project-version@
 ## SavedVariables: DoesItDieDB
+## X-Curse-Project-ID: 1709161
 
 DoesItDie.lua
