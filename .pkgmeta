@@ -9,3 +9,4 @@ ignore:
     - WillItDieProbe
     - tools
     - README.md
+    - CLAUDE.md
