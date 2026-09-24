@@ -33,6 +33,7 @@ local SPELLS = {
     [3] = { "Claw", "Claw the enemy, causing 27 additional damage.  Awards 1 combo point." },
     [4] = { "Rip", "Finishing move that causes damage over time. 1 point : 42 damage over 12 sec. 2 points: 71 damage over 12 sec. 5 points: 138 damage over 12 sec." },
     [5] = { "Rend", "Wounds the target causing them to bleed for 45 damage over 9 sec." },
+    [6] = { "Bane of Agony", "Afflicts the target with agony, causing 72 Shadow damage over 24 sec.  This damage is dealt slowly at first, and builds up as the Bane reaches its full duration." },
 }
 local function spellNameAndDescription(id) return SPELLS[id][1], SPELLS[id][2] end
 """ + chunk("local UPDATE_INTERVAL", "-- User options") + chunk(
@@ -115,6 +116,23 @@ sim.reset(); sim.learn(1, 10); sim.cast(1)
 sim.advance(1.0); sim.hit(26, 32); sim.advance(1.0); sim.hit(27, 32)
 check("Two off-rhythm Shadow Bolts don't trigger a relearn", sim.learned(1), 10)
 
+# Replay of log 166015.8: Bane of Agony, 72 over 24s, back-loaded ticks 3,3,3,3,6,6,6,6,9,9,9,9 every 2s.
+# Previously it learned 3, estimated half the damage, rejected the 6s, relearned, and dropped the 9s.
+sim.reset(); sim.cast(6)
+check("Replay: Bane of Agony estimate at cast is the full 72", sim.marker(), "72 dmg from 1 DoT(s)")
+remaining = []
+for amount in (3, 3, 3, 3, 6, 6, 6, 6, 9, 9, 9, 9):
+    sim.advance(2.0); sim.hit(amount, 32)
+    remaining.append(sim.marker().split()[0])
+check("  remaining after each tick follows the ramp", remaining,
+      ["69", "66", "63", "60", "54", "48", "42", "36", "27", "18", "9", "0"])
+log = sim.log()
+check("  all 12 ticks matched", log.count("TICK Bane of Agony"), 12)
+check("  no relearn or unmatched hits", ("RELEARN" in log) or ("not matched" in log), False)
+check("  learned the average tick (6)", float(sim.learned(6)), 6.0)
+sim.advance(3.0); sim.cast(6)
+check("  next cast starts from the learned average: 72", sim.marker(), "72 dmg from 1 DoT(s)")
+
 # Replay of the in-game miss (log 99223.7): 2-point Rip missed, white hits of 20-22 kept landing near tick
 # times. Previously a white hit at +2.6s "proved" the Rip and brought it back.
 sim.reset(); sim.learn("4x2", 15.2)
@@ -155,7 +173,7 @@ sim.advance(1.95); sim.hit(41, 1, "CRITICAL")
 check("  white crit (41) at tick time isn't a tick crit", sim.marker(), "30 dmg from 1 DoT(s)")
 sim.advance(0.05); sim.hit(30, 1, "CRITICAL")
 check("  tick crit (30 = 2x15) is", sim.marker(), "15 dmg from 1 DoT(s)")
-check("  and doesn't raise the expected tick size", "expecting 15.0/tick" in sim.log().split("\n")[-1], True)
+check("  and doesn't raise the expected tick size", "expecting 15.0 for this tick" in sim.log().split("\n")[-1], True)
 
 sim.reset(); sim.learn(1, 10); sim.avoid("MISS"); sim.advance(1.0); sim.cast(1)
 check("Old miss (1s before cast): ignored, shown", sim.marker(), "40 dmg from 1 DoT(s)")

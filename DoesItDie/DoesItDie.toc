@@ -8,3 +8,4 @@
 
 DoesItDie.lua
 Options.lua
+Nameplates.lua

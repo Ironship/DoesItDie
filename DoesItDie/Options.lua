@@ -10,10 +10,10 @@
 local ADDON_NAME, ns = ...
 
 local WHITE = "Interface\\Buttons\\WHITE8X8"
-local WINDOW_WIDTH, WINDOW_HEIGHT = 760, 492
+local WINDOW_WIDTH, WINDOW_HEIGHT = 760, 548 -- tall enough for the longest tab (Nameplates, 15 rows)
 local HEADER_HEIGHT = 52 -- title bar: title, presets, close button
 local PREVIEW_WIDTH = 290
-local ROW_HEIGHT = 30
+local ROW_HEIGHT = 26
 local SETTINGS_LAYOUT = { label = 170, control = 200 }
 local PREVIEW_LAYOUT = { label = 92, control = 140 }
 local DISABLED_ALPHA = 0.35
@@ -102,9 +102,36 @@ local function refreshControls()
     for _, control in ipairs(controls) do control:Refresh() end
 end
 
+local function inCombat()
+    return (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
+end
+
+-- The preview only takes over the display out of combat: in combat the real target comes first, even with the
+-- window open (settings changes still apply to it live).
+local function syncDisplayHost()
+    if not window or not window:IsShown() then return end
+    local paused = inCombat() and true or false
+    window.combatNote:SetShown(paused)
+    window.mock:SetAlpha(paused and 0.3 or 1)
+    window.mockPlate:SetAlpha(paused and 0.3 or 1)
+    window.simulateButton:SetEnabled(not paused)
+    window.flashButton:SetEnabled(not paused)
+    if paused ~= window.previewPaused then
+        window.previewPaused = paused
+        if paused and simulation then
+            simulation:Cancel()
+            simulation = nil
+            window.simulateButton:SetText("Simulate fight")
+        end
+        ns.setDisplayHost((not paused) and window.host or nil)
+        ns.setPlatePreview((not paused) and window.plateHost or nil, preview)
+    end
+end
+
 local function updatePreview()
     if not window then return end
     window.healthBar:SetValue(preview.health)
+    window.plateHealthBar:SetValue(preview.health)
     local total = previewTotal()
     if total <= 0 then
         window.status:SetText("No DoTs on the target")
@@ -389,6 +416,7 @@ local function selectTab(tab)
         other.content:SetShown(selected)
         other.button.text:SetTextColor(selected and 1 or 0.6, selected and 0.82 or 0.6, selected and 0 or 0.6)
         other.button.underline:SetShown(selected)
+        if other.footer then other.footer:SetShown(selected) end
     end
 end
 
@@ -511,6 +539,45 @@ local function buildTabs()
     text:slider("labelSize", "Size", 8, 20, 1, { enabledIf = showsLabel })
     text:choice("labelColor", "Color", lists.colors, { enabledIf = showsLabel })
 
+    -- Nameplates have their own look: enemy plates are red, so the target marker's colors may not show on them.
+    local platesOn = function(s) return s.nameplateMode ~= "off" end
+    local plateIcon = function(s) return s.nameplateMode == "markerIcon" end
+    local plateSingle = function(s) return platesOn(s) and s.plateDotColors == "single" end
+    local plateOutline = function(s) return platesOn(s) and s.plateOutlineStyle ~= "none" end
+    local plates = addTab("Nameplates")
+    plates:choice("nameplateMode", "Show on nameplates", lists.nameplateModes, { tooltip = "Draws a marker "
+        .. "(and optionally the kill icon) on every enemy nameplate with your DoTs on it, in its own look below." })
+    plates:choice("plateIcon", "Kill icon", lists.icons, { enabledIf = plateIcon })
+    plates:slider("nameplateIconSize", "Kill icon size", 12, 32, 1, { enabledIf = plateIcon })
+    plates:choice("nameplateIconPosition", "Kill icon position", lists.nameplateIconPositions,
+        { enabledIf = plateIcon })
+    plates:slider("plateIconOffsetX", "Icon horizontal offset", -40, 40, 1,
+        { enabledIf = plateIcon, tooltip = "Pixels right (+) or left (-) of the chosen position." })
+    plates:slider("plateIconOffsetY", "Icon vertical offset", -40, 40, 1,
+        { enabledIf = plateIcon, tooltip = "Pixels up (+) or down (-) from the chosen position." })
+    plates:gap()
+    plates:choice("plateDotColors", "DoT colors", lists.dotColors, { enabledIf = platesOn })
+    plates:choice("plateFillTexture", "Fill style", lists.fills, { enabledIf = platesOn })
+    plates:choice("plateFillColor", "Fill color", lists.colors, { enabledIf = plateSingle })
+    plates:slider("plateFillOpacity", "Fill opacity", 0, 100, 5, { suffix = "%", enabledIf = platesOn })
+    plates:choice("plateOutlineStyle", "Outline", lists.outlines, { enabledIf = platesOn })
+    plates:choice("plateDashLength", "Dash length", lists.dashLengths,
+        { enabledIf = function(s) return platesOn(s) and s.plateOutlineStyle == "dashed" end })
+    plates:slider("plateOutlineThickness", "Outline thickness", 1, 3, 1, { enabledIf = plateOutline })
+    plates:choice("plateOutlineColor", "Outline color", lists.colors, { enabledIf = plateOutline })
+    plates:slider("plateOutlineOpacity", "Outline opacity", 10, 100, 5, { suffix = "%", enabledIf = plateOutline })
+    plates.footer = pushButton(window.settingsArea, "Copy from Marker tab", 160, function()
+        local db = ns.db
+        db.plateFillTexture, db.plateFillColor, db.plateFillOpacity = db.fillTexture, db.fillColor, db.fillOpacity
+        db.plateDotColors, db.plateIcon = db.dotColors, db.skullIcon
+        db.plateOutlineStyle, db.plateDashLength = db.outlineStyle, db.dashLength
+        db.plateOutlineThickness = math.min(db.outlineThickness, 3)
+        db.plateOutlineColor, db.plateOutlineOpacity = db.outlineColor, db.outlineOpacity
+        changed()
+    end)
+    plates.footer:SetPoint("BOTTOMLEFT", 10, 10)
+    plates.footer:Hide()
+
     local behavior = addTab("Behavior")
     behavior:choice("waitFirstTick", "Wait for first tick", lists.waitModes, { tooltip = "Whether a new DoT "
         .. "counts before its first tick lands. \"When unsure\" waits for finishers with unknown combo points "
@@ -557,6 +624,15 @@ local function buildPreview(pane)
 
     window.healthBar = healthBar
     window.host = { healthBar = healthBar, portrait = portrait, layerFrame = window }
+    window.mock = mock
+
+    -- Shown over the mock frame while combat has the display back on the real target.
+    window.combatNote = pane:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    window.combatNote:SetPoint("CENTER", mock, "CENTER")
+    window.combatNote:SetWidth(PREVIEW_WIDTH - 40)
+    window.combatNote:SetText("In combat: the marker and kill icon are showing on your target. "
+        .. "The preview resumes after combat.")
+    window.combatNote:Hide()
 
     -- Preview controls (plain numbers, not settings).
     local health = sliderRow(pane, "Target health", 0, 100, 1,
@@ -581,13 +657,36 @@ local function buildPreview(pane)
         if simulation then stopSimulation() else startSimulation() end
     end)
     window.simulateButton:SetPoint("TOPLEFT", damage, "BOTTOMLEFT", 6, -10)
-    local flash = pushButton(pane, "Flash", 80, function() ns.playFlash() end)
-    flash:SetPoint("LEFT", window.simulateButton, "RIGHT", 8, 0)
+    window.flashButton = pushButton(pane, "Flash", 80, function() ns.playFlash() end)
+    window.flashButton:SetPoint("LEFT", window.simulateButton, "RIGHT", 8, 0)
 
     window.status = pane:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     window.status:SetPoint("TOPLEFT", window.simulateButton, "BOTTOMLEFT", 0, -14)
     window.status:SetWidth(PREVIEW_WIDTH - 30)
     window.status:SetJustifyH("LEFT")
+
+    -- Mock enemy nameplate (red, like the real ones), drawn by the real nameplate code (Nameplates.lua).
+    local plateLabel = pane:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    plateLabel:SetPoint("TOPLEFT", window.status, "BOTTOMLEFT", 0, -20)
+    plateLabel:SetText("Nameplate")
+    local mockPlate = CreateFrame("Frame", nil, pane)
+    mockPlate:SetSize(140, 26)
+    mockPlate:SetPoint("TOPLEFT", plateLabel, "BOTTOMLEFT", 40, -6)
+    local plateName = mockPlate:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    plateName:SetPoint("TOP", mockPlate, "TOP")
+    plateName:SetText("Mottled Boar")
+    local plateBar = CreateFrame("StatusBar", nil, mockPlate)
+    plateBar:SetSize(140, 10)
+    plateBar:SetPoint("BOTTOM", mockPlate, "BOTTOM")
+    plateBar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
+    plateBar:SetStatusBarColor(0.85, 0.1, 0.1)
+    plateBar:SetMinMaxValues(0, 100)
+    local plateBack = plateBar:CreateTexture(nil, "BACKGROUND")
+    plateBack:SetAllPoints()
+    plateBack:SetColorTexture(0.1, 0.02, 0.02, 1)
+    window.mockPlate = mockPlate
+    window.plateHealthBar = plateBar
+    window.plateHost = { plate = mockPlate, healthBar = plateBar }
 
     local hint = pane:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     hint:SetPoint("BOTTOMLEFT", pane, "BOTTOMLEFT", 12, 12)
@@ -660,7 +759,8 @@ local function createWindow()
 
     window:SetScript("OnShow", function()
         ns.setPreviewState(preview)
-        ns.setDisplayHost(window.host)
+        window.previewPaused = nil
+        syncDisplayHost()
         refreshControls()
         updatePreview()
     end)
@@ -669,7 +769,12 @@ local function createWindow()
         closeMenu()
         ns.setPreviewState(nil)
         ns.setDisplayHost(nil)
+        ns.setPlatePreview(nil)
     end)
+    -- Combat hands the display back to the real target, and after combat back to the preview.
+    window:RegisterEvent("PLAYER_REGEN_DISABLED")
+    window:RegisterEvent("PLAYER_REGEN_ENABLED")
+    window:SetScript("OnEvent", function() syncDisplayHost() end)
     selectTab(tabs[1])
 end
 

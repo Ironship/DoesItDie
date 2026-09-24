@@ -66,6 +66,7 @@ function methods.GetFrameStrata(self) return self.strata or "MEDIUM" end
 function methods.SetFrameLevel(self, v) self.level = v end
 function methods.GetFrameLevel(self) return self.level or 5 end
 function methods.GetChildren(self) return end
+function methods.SetClipsChildren(self, v) self.clips = v end
 function methods.IsMouseOver(self) return false end
 function methods.GetStatusBarTexture(self) self._tex = self._tex or mock("tex", self); return self._tex end
 function methods.GetThumbTexture(self) self._thumb = self._thumb or mock("thumb", self); return self._thumb end
@@ -115,12 +116,28 @@ C_Timer = {
         return ticker
     end,
 }
-C_Spell = { GetSpellName = function() return "Spell" end, GetSpellDescription = function() return "" end }
+C_Spell = {
+    GetSpellName = function(id) return id == 172 and "Corruption" or "Spell" end,
+    GetSpellDescription = function(id)
+        return id == 172 and "Corrupts the target, causing 40 Shadow damage over 12 sec." or ""
+    end,
+}
 Enum = { PowerType = { ComboPoints = 4 } }
 function GetTime() return now end
-function UnitExists() return false end
-function UnitGUID() return nil end
+targetGuid = nil -- set later: the target and nameplate1 are then the same mob
+function UnitExists(unit) return unit == "nameplate1" or (unit == "target" and targetGuid ~= nil) end
+function UnitCanAttack() return true end
+function IsInInstance() return false, "none" end
+local plate = mock("Frame")
+FakePlate = plate
+plate.UnitFrame = mock("Frame", plate)
+plate.UnitFrame.healthBar = mock("StatusBar", plate.UnitFrame)
+C_NamePlate = { GetNamePlateForUnit = function(unit) if unit == "nameplate1" then return plate end end }
+function UnitGUID(unit) if unit == "target" or unit == "nameplate1" then return targetGuid end end
 function UnitIsDead() return false end
+combat = false
+function UnitAffectingCombat() return combat end
+function InCombatLockdown() return combat end
 function UnitHealth() return 100 end
 function UnitHealthMax() return 100 end
 function hooksecurefunc() end
@@ -221,14 +238,24 @@ for name in files:
     step(f"load {name}", lambda name=name: H.load(name, open(os.path.join(ADDON, name), encoding="utf-8").read(), ns))
 
 step("ADDON_LOADED", lambda: H.fire("ADDON_LOADED", "DoesItDie"))
-check("defaults applied", G.DoesItDieDB.skullIcon, "shades")
+check("defaults applied", G.DoesItDieDB.skullIcon, "cross")
 step("run the display loop with no target", lambda: H.update(0.2))
 step("/did opens the window", lambda: G.SlashCmdList.DOESITDIE(""))
 check("window shown", G.DoesItDieOptions.shown, True)
 step("display loop with the window's preview", lambda: H.update(0.2))
 
-for tab in ("Kill icon", "Marker", "Effects", "Text", "Behavior"):
+for tab in ("Kill icon", "Marker", "Effects", "Text", "Nameplates", "Behavior"):
     step(f"open tab {tab}", lambda tab=tab: H.clickText(tab))
+
+
+def copy_marker_look():
+    H.clickText("Nameplates")
+    G.DoesItDieDB.fillColor = "gold"
+    H.clickText("Copy from Marker tab")
+
+
+step("Nameplates: Copy from Marker tab", copy_marker_look)
+check("  plate fill color copied from the marker", G.DoesItDieDB.plateFillColor, "gold")
 
 for preset in ("Minimal", "Classic", "Debug", "Juicy"):
     step(f"apply preset {preset}", lambda p=preset: H.clickText(p))
@@ -263,6 +290,20 @@ check("  kill icon frame shown", G.DoesItDieSkull.shown, True)
 check("  marker layered above the window's strata", G.DoesItDieRemaining.strata, "FULLSCREEN")
 
 
+def preview_plate_markers():
+    # The mock nameplate is the window's only frame whose child StatusBar is sized 140x10.
+    for f in G.frames.values():
+        if f.kind == "Frame" and f.width == 140 and f.height == 26:
+            return [c for c in f.children.values() if c.kind == "StatusBar" and c.width != 140]
+    return []
+
+
+markers_on_preview_plate = preview_plate_markers()
+check("  preview nameplate got a marker", len(markers_on_preview_plate) >= 1, True)
+check("  preview nameplate marker filled to the DoT damage",
+      round(markers_on_preview_plate[0].value) if markers_on_preview_plate else None, 50)
+
+
 def pick_outline_none():
     H.clickText("Marker")
     button = H.rowWidget("Outline", "Button")
@@ -282,6 +323,25 @@ step("display loop without outline", lambda: H.update(0.2))
 step("Reset this tab (Marker)", lambda: H.clickText("Reset this tab"))
 check("  outline back to default", G.DoesItDieDB.outlineStyle, "dashed")
 
+def enter_combat():
+    G.combat = True
+    H.fire("PLAYER_REGEN_DISABLED")
+    H.update(1.2)
+
+
+def leave_combat():
+    G.combat = False
+    H.fire("PLAYER_REGEN_ENABLED")
+    H.update(1.2)
+
+
+step("enter combat with the window open", enter_combat)
+check("  display back on the target frame (not the window's strata)", G.DoesItDieRemaining.strata != "FULLSCREEN", True)
+check("  log says the preview stepped aside",
+      any("PREVIEW off" in line for line in list(G.DoesItDieDB.log.values())[-5:]), True)
+step("leave combat", leave_combat)
+check("  preview has the display again", G.DoesItDieRemaining.strata, "FULLSCREEN")
+
 step("start Simulate fight", lambda: H.clickText("Simulate fight"))
 step("run the simulated fight", lambda: (H.runTickers(25), H.update(0.2)))
 step("Flash button", lambda: H.clickText("Flash"))
@@ -290,6 +350,41 @@ step("close the window", lambda: G.DoesItDieOptions.Hide(G.DoesItDieOptions))
 check("window hidden", G.DoesItDieOptions.shown, False)
 step("display loop back on the (absent) target", lambda: H.update(0.2))
 step("/did help", lambda: G.SlashCmdList.DOESITDIE("help"))
+step("/did plates", lambda: G.SlashCmdList.DOESITDIE("plates"))
+plate_lines = [line for line in G.DoesItDieDB.log.values() if "PLATES" in line]
+check("  probe logged the fake nameplate", any("nameplate1" in line and "healthBar=UnitFrame.healthBar" in line
+                                                and "anchorPlate=ok" in line for line in plate_lines), True)
+check("  probe summary", plate_lines[-1].split("PLATES ")[1], "probe done: 1 nameplates, 1 test bars shown")
+step("test bars hide after 8 seconds", lambda: H.update(9))
+
+
+def plate_children(kind):
+    return [c for c in G.FakePlate.children.values() if c.kind == kind]
+
+
+def dot_the_mob():
+    G.targetGuid = "Creature-0-1-2-3-3099-000001"
+    H.fire("UNIT_SPELLCAST_SUCCEEDED", "player", "cast-1", 172)
+    H.update(0.2)
+
+
+step("cast Corruption on the mob behind nameplate1", dot_the_mob)
+markers = plate_children("StatusBar")
+check("  nameplate got a marker", len(markers), 1)
+check("  marker filled to Corruption's 40", markers[0].value if markers else None, 40)
+check("  marker shown", markers[0].shown if markers else None, True)
+icon_windows = [f for f in plate_children("Frame") if f.clips]  # the clipped kill icon window
+check("  kill icon window shown", icon_windows[0].shown if icon_windows else None, True)
+
+
+def plates_off():
+    G.DoesItDieDB.nameplateMode = "off"
+    H.update(0.2)
+
+
+step("switch nameplates off", plates_off)
+check("  marker hidden", markers[0].shown if markers else None, False)
+check("  kill icon hidden", icon_windows[0].shown if icon_windows else None, False)
 
 print(f"\n{'all passed' if not failures else str(failures) + ' FAILED'}")
 sys.exit(1 if failures else 0)

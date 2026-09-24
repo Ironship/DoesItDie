@@ -41,6 +41,15 @@ local KNOWN_TICK_INTERVALS = {
     ["Rupture"] = 2,
 }
 
+-- DoTs whose ticks aren't even: each tick is the average tick times its factor (factors average 1, so the
+-- tooltip total still holds). Agony is back-loaded; seen in-game on Forever (log 166015.8, 72 over 24s):
+-- ticks 3,3,3,3 then 6,6,... then 9s. Everything else ticks evenly.
+local AGONY_SHAPE = { 0.5, 0.5, 0.5, 0.5, 1, 1, 1, 1, 1.5, 1.5, 1.5, 1.5 }
+local TICK_SHAPES = {
+    ["Bane of Agony"] = AGONY_SHAPE, -- Forever's name
+    ["Curse of Agony"] = AGONY_SHAPE,
+}
+
 -- Descriptions that don't name their school.
 local SCHOOL_BY_NAME = {
     ["Siphon Life"] = 32,
@@ -65,7 +74,7 @@ local SCHOOL_MASKS = {
 local DEFAULTS = {
     -- Skull
     showSkull = true,
-    skullIcon = "shades",
+    skullIcon = "cross",
     skullSize = 64,
     skullPulse = true,
     skullOffsetX = 0,
@@ -102,6 +111,22 @@ local DEFAULTS = {
     debug = false,
     -- Accuracy
     waitFirstTick = "off",
+    -- Nameplates (Nameplates.lua): their own look, since enemy plates are red. Defaults read well on red.
+    nameplateMode = "markerIcon",
+    nameplateIconSize = 18,
+    nameplateIconPosition = "left", -- the level badge sits right of the bar on Forever's plates
+    plateIconOffsetX = 0,
+    plateIconOffsetY = 15,          -- clear of the level number, which draws over the icon
+    plateIcon = "skull",
+    plateDotColors = "single",
+    plateFillTexture = "flat",
+    plateFillColor = "white",
+    plateFillOpacity = 45,
+    plateOutlineStyle = "solid",
+    plateDashLength = 2,
+    plateOutlineThickness = 1,
+    plateOutlineColor = "white",
+    plateOutlineOpacity = 100,
 }
 
 -- "Wait for first tick": whether a DoT counts toward the marker before its first tick has landed.
@@ -245,11 +270,25 @@ end
 -- DoT tracking
 ---------------------------------------------------------------------------
 
--- Best known damage per tick: observed average of non-crit ticks, else learned from earlier casts,
--- else the description. Crits are one-offs, so they never raise the expectation for later ticks.
+-- Best known average damage per tick: observed average of non-crit ticks, else learned from earlier casts,
+-- else the description. Crits are one-offs, so they never raise the expectation for later ticks. For shaped
+-- DoTs (TICK_SHAPES) ticks are stored divided by their factor, so this is the average tick, not the latest.
 local function expectedTick(dot)
     if dot.normalTicks > 0 then return dot.tickSum / dot.normalTicks end
     return (dot.tickKey and db.ticks[dot.tickKey]) or (dot.total / dot.totalTicks)
+end
+
+-- Which tick of the DoT (1 = first) lands around `when`.
+local function tickNumberAt(dot, when)
+    return math.max(1, math.floor((when - dot.appliedAt) / dot.interval + 0.5))
+end
+
+-- The factor for tick `number` (1 for evenly ticking DoTs). Shapes are stretched to the DoT's tick count.
+local function tickShape(dot, number)
+    local shape = dot.shape
+    if not shape then return 1 end
+    local i = math.ceil(math.min(math.max(number, 1), dot.totalTicks) / dot.totalTicks * #shape)
+    return shape[math.max(1, math.min(i, #shape))]
 end
 
 -- A waiting DoT doesn't count toward the marker until its first tick lands (see WAIT_MODES).
@@ -434,6 +473,7 @@ local function onPlayerCast(spellID)
         duration = duration,
         interval = interval,
         totalTicks = math.max(1, math.floor(duration / interval + 0.5)),
+        shape = TICK_SHAPES[name],
         appliedAt = now,
         expiresAt = now + duration,
         nextTickAt = now + interval,
@@ -470,7 +510,7 @@ local function distanceToExpectedTick(dot, now)
     return math.abs(now - (anchor + k * dot.interval)), k
 end
 
-local function plausibleTickAmount(dot, amount, isCrit)
+local function plausibleTickAmount(dot, amount, isCrit, number)
     local known, tolerance
     if dot.normalTicks > 0 then
         known, tolerance = dot.tickSum / dot.normalTicks, TICK_AMOUNT_TOLERANCE
@@ -478,6 +518,7 @@ local function plausibleTickAmount(dot, amount, isCrit)
         known, tolerance = dot.tickKey and db.ticks[dot.tickKey], FIRST_TICK_AMOUNT_TOLERANCE
     end
     if not known then return true end
+    known = known * tickShape(dot, number)
     if isCrit then
         return amount >= known * CRIT_MIN_RATIO - 1 and amount <= known * CRIT_MAX_RATIO + 1
     end
@@ -489,7 +530,7 @@ end
 -- corrupt.
 local function referenceTickSize(dot)
     if dot.normalTicks > 1 then
-        return (dot.tickSum - dot.lastTickAmount) / (dot.normalTicks - 1)
+        return (dot.tickSum - dot.lastTickAmount / dot.lastTickShape) / (dot.normalTicks - 1)
     end
     return dot.total / dot.totalTicks
 end
@@ -524,10 +565,11 @@ local function trySwapSameSlot(dot, name, amount, isCrit, now)
     if isCrit or dot.lastTickCrit or not dot.lastTickAt or now - dot.lastTickAt > SAME_SLOT_SECONDS then
         return false
     end
-    local reference = referenceTickSize(dot)
+    local factor = dot.lastTickShape
+    local reference = referenceTickSize(dot) * factor
     if math.abs(amount - reference) >= math.abs(dot.lastTickAmount - reference) then return false end
     trace(string.format("SWAP %s tick: %d was another hit, %d is the tick", name, dot.lastTickAmount, amount))
-    dot.tickSum = dot.tickSum - dot.lastTickAmount + amount
+    dot.tickSum = dot.tickSum + (amount - dot.lastTickAmount) / factor
     dot.lastTickAmount = amount
     saveLearnedTick(dot)
     return true
@@ -541,17 +583,19 @@ local function tryRelearn(dot, name, amount, isCrit, index, distance, now)
     local freshSlot = not dot.firstTickAt or index > dot.lastTickIndex
     if isCrit or not freshSlot or distance > window then return false end
     local previous = dot.offBeatCandidate
-    dot.offBeatCandidate = { index = index, amount = amount, at = now }
+    local factor = tickShape(dot, tickNumberAt(dot, now))
+    local average = amount / factor
+    dot.offBeatCandidate = { index = index, amount = amount, average = average, at = now }
     if not previous or index ~= previous.index + 1
-        or math.abs(amount - previous.amount) > math.max(1, previous.amount * TICK_AMOUNT_TOLERANCE) then
+        or math.abs(average - previous.average) > math.max(1, previous.average * TICK_AMOUNT_TOLERANCE) then
         return false
     end
     trace(string.format("RELEARN %s: ticks of %d and %d on its rhythm didn't fit %.1f/tick", name,
         previous.amount, amount, expectedTick(dot)))
     dot.offBeatCandidate = nil
-    dot.tickSum, dot.normalTicks = previous.amount + amount, 2
+    dot.tickSum, dot.normalTicks = previous.average + average, 2
     dot.ticksSeen = dot.ticksSeen + 2
-    dot.lastTickAmount, dot.lastTickCrit = amount, false
+    dot.lastTickAmount, dot.lastTickShape, dot.lastTickCrit = amount, factor, false
     saveLearnedTick(dot)
     if not dot.firstTickAt then
         dot.firstTickAt, dot.lastTickIndex = previous.at, 0
@@ -585,7 +629,7 @@ local function onUnitCombat(unit, action, flag, amount, school)
 
     local best, bestName, bestDistance, bestIndex
     for name, dot in pairs(dots) do
-        if dot.school == school and plausibleTickAmount(dot, amount, isCrit) then
+        if dot.school == school and plausibleTickAmount(dot, amount, isCrit, tickNumberAt(dot, now)) then
             local distance, index = distanceToExpectedTick(dot, now)
             local window = dot.firstTickAt and TICK_MATCH_WINDOW_ANCHORED or TICK_MATCH_WINDOW
             -- Each tick slot takes one hit: a second hit near an already-matched tick is someone else's.
@@ -613,17 +657,18 @@ local function onUnitCombat(unit, action, flag, amount, school)
     end
 
     local wasWaiting = isWaiting(best)
+    local factor = tickShape(best, tickNumberAt(best, now))
     best.ticksSeen = best.ticksSeen + 1
-    best.lastTickAmount, best.lastTickCrit = amount, isCrit
+    best.lastTickAmount, best.lastTickShape, best.lastTickCrit = amount, factor, isCrit
     best.offBeatCandidate = nil
     if not isCrit then
-        best.tickSum = best.tickSum + amount
+        best.tickSum = best.tickSum + amount / factor
         best.normalTicks = best.normalTicks + 1
         saveLearnedTick(best)
     end
     local tickIndex = anchorTick(best, bestIndex, now)
-    trace(string.format("TICK %s %d%s on %s (tick %d/%d, expecting %.1f/tick)%s", bestName, amount,
-        isCrit and " CRIT" or "", unit, tickIndex, best.totalTicks, expectedTick(best),
+    trace(string.format("TICK %s %d%s on %s (tick %d/%d, expecting %.1f for this tick)%s", bestName, amount,
+        isCrit and " CRIT" or "", unit, tickIndex, best.totalTicks, expectedTick(best) * factor,
         wasWaiting and ", now shown" or ""))
     if wasWaiting then return key end
 end
@@ -650,13 +695,17 @@ end
 local function remainingDamage(dot)
     if dot.nextTickAt > dot.expiresAt + dot.interval / 2 then return 0 end
     local ticksLeft = math.floor((dot.expiresAt - dot.nextTickAt) / dot.interval + 0.5) + 1
-    return ticksLeft * expectedTick(dot)
+    if not dot.shape then return ticksLeft * expectedTick(dot) end
+    local average, total = expectedTick(dot), 0
+    for number = math.max(1, dot.totalTicks - ticksLeft + 1), dot.totalTicks do
+        total = total + average * tickShape(dot, number)
+    end
+    return total
 end
 
--- Remaining damage per DoT on the target, oldest application first. DoTs still waiting for their first tick
--- are left out.
-local function targetDotBreakdown()
-    local key = unitKey("target")
+-- Remaining damage per DoT on a mob (by unitKey), oldest application first. DoTs still waiting for their first
+-- tick are left out.
+local function dotBreakdown(key)
     local dots = key and dotsByTarget[key]
     local list = {}
     if not dots then return list end
@@ -671,9 +720,9 @@ local function targetDotBreakdown()
 end
 
 -- Returns what the target's DoTs still have to deal, how many DoTs count toward it, and the per-DoT
--- breakdown (see targetDotBreakdown).
+-- breakdown (see dotBreakdown).
 local function targetRemainingDamage()
-    local list = targetDotBreakdown()
+    local list = dotBreakdown(unitKey("target"))
     local total = 0
     for _, entry in ipairs(list) do total = total + entry.damage end
     return math.floor(total + 0.5), #list, list
@@ -749,8 +798,9 @@ local DOT_PALETTE = {
 }
 local paletteIndexByName, nextPaletteIndex = {}, 1
 
-local function dotColor(entry)
-    if db.dotColors == "school" then
+-- mode: "school" or "each"; defaults to the target marker's setting (nameplates pass their own).
+local function dotColor(entry, mode)
+    if (mode or db.dotColors) == "school" then
         return SCHOOL_COLORS[entry.school] or COLOR_BY_ID.white
     end
     local index = paletteIndexByName[entry.name]
@@ -1555,6 +1605,18 @@ ns.lists = {
 }
 ns.refresh = safeRefresh
 ns.playFlash = playFlash
+ns.dotColor = dotColor
+ns.colorOf = colorOf
+ns.findById = findById
+ns.textureDir = TEXTURE_DIR
+
+-- The DoTs on the mob behind `unit` (e.g. "nameplate3"): per-DoT breakdown and total remaining damage.
+function ns.dotBreakdownForUnit(unit)
+    local list = dotBreakdown(unitKey(unit))
+    local total = 0
+    for _, entry in ipairs(list) do total = total + entry.damage end
+    return list, total
+end
 ns.print = print
 ns.trace = trace
 
@@ -1681,6 +1743,8 @@ SlashCmdList.DOESITDIE = function(msg)
         else
             print("Health bar markers " .. (db.showMarkers and "ON" or "OFF") .. ".")
         end
+    elseif cmd == "plates" then
+        ns.probeNameplates()
     elseif cmd == "skull" then
         skullTestUntil = GetTime() + 5
         print("Kill icon test for 5 seconds: one icon ON the portrait (the real one) and one ABOVE it (plain test).")
@@ -1696,6 +1760,7 @@ SlashCmdList.DOESITDIE = function(msg)
         print("/did - open the options window")
         print("/did line - toggle health bar markers on/off")
         print("/did skull - show the kill icon for 5 seconds to check its position")
+        print("/did plates - check what the addon can reach on visible nameplates (logged)")
         print("/did debug - toggle echoing the trace log (casts, ticks, estimates) to chat")
         print("/did reset - forget learned tick sizes")
     end

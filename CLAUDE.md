@@ -1,7 +1,8 @@
 # DoesItDie
 
-A World of Warcraft: **Forever** addon (version 0.2.0). It tracks the player's damage-over-time spells on the
-current target and shows whether they will finish it off:
+A World of Warcraft: **Forever** addon (released from `v*` tags; see `.github/workflows/release.yml`). It tracks
+the player's damage-over-time spells on the current target (and on enemy nameplates) and shows whether they will
+finish it off:
 
 - a **damage marker** on the target frame's health bar, covering the damage the DoTs still have to deal
   (if the green health ends inside it, the target dies), and
@@ -44,6 +45,7 @@ Consequences for the design:
 |---|---|
 | `DoesItDie/DoesItDie.lua` | The addon, in sections: constants and tables, helpers, description parsing, DoT tracking (combo points, cast outcomes, tick matching), display, settings and what `Options.lua` needs (`ns.*`), events, slash commands |
 | `DoesItDie/Options.lua` | The options window: live preview with a mock target frame, tabs, presets, hand-built controls; plus a small page in Options > AddOns that opens it. Shares data with `DoesItDie.lua` through the addon namespace (`local _, ns = ...`) |
+| `DoesItDie/Nameplates.lua` | The marker and a small kill icon on every enemy nameplate with your DoTs (per-plate widgets parented to Blizzard's recycled plate frames, fed via `ns.dotBreakdownForUnit`), with their own look settings (`plate*`, since enemy plates are red) and a mock plate in the options preview; plus the `/did plates` probe. Probe verified plates are reachable and anchorable in the open world, in and out of combat; dungeons are untested |
 | `DoesItDie/Textures/` | Generated TGAs: patterns (dashes, stripes, spark, shine) and the sunglasses icon |
 | `tools/make_textures.py` | Regenerates the textures |
 | `tools/scrape_forever_spellbook.py` | Scrapes all nine class spellbooks from foreverchanges.pro into `tools/data/forever_spellbook.json` |
@@ -82,7 +84,7 @@ Tuning constants (tick windows, tolerances, fallbacks) are at the top of `DoesIt
   `…\_classic_beta_\WTF\Account\<account>\SavedVariables\DoesItDie.lua`. Reading this after the user plays is
   the main debugging loop. `/did debug` echoes the log to chat.
 - **Slash commands:** `/did` (options window), `/did skull` (5-second kill icon test with geometry logged), `/did line`,
-  `/did debug`, `/did reset` (forget learned tick sizes).
+  `/did debug`, `/did reset` (forget learned tick sizes), `/did plates` (nameplate probe, logged).
 - **Tests:** `pip install lupa`, then run the five `tools/test_*.py` scripts (use `--update` on
   `test_spellbook.py` only after reviewing a change). There's no Lua install; `luaparser` (pip) works as a
   syntax check.
@@ -105,7 +107,9 @@ Known limitations:
 
 - Only the **player's** DoTs are tracked.
 - Proc DoTs with no cast (Deep Wounds, Ignite, poisons) aren't tracked. Their ticks show up as unmatched hits.
-- Bane of Agony (back-loaded ticks) is underestimated. Lacerate's stacks are approximated.
+- Uneven DoTs need a tick shape in `TICK_SHAPES` (Bane/Curse of Agony: 4 ticks at 0.5x, 4 at 1x, 4 at 1.5x the
+  average, confirmed in-game); anything uneven that isn't listed is treated as even. Lacerate's stacks are
+  approximated.
 - Extra combo points from crits (Primal Fury, Seal Fate) aren't counted, so estimates err low.
 - Hunter **Black Arrow** (Forever reuses Classic's "150 Shadow damage and draining 150 mana over 30 sec")
   isn't tracked; its tick behavior is unverified.
