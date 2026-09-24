@@ -10,7 +10,7 @@
 -- StatusBars accept secret values, so the "damage >= health" comparison is done by the widget, not
 -- by Lua: see the skull notes in the Display section.
 
-local ADDON_NAME = ...
+local ADDON_NAME, ns = ... -- ns is shared with Options.lua
 
 local UPDATE_INTERVAL = 0.1
 local DEFAULT_TICK_INTERVAL = 3
@@ -28,7 +28,7 @@ local TICK_AMOUNT_TOLERANCE = 0.25
 local FIRST_TICK_AMOUNT_TOLERANCE = 0.3
 -- A crit tick is 1.5-2x a normal one; anything else flagged as a crit (white-hit crits) isn't this DoT.
 local CRIT_MIN_RATIO, CRIT_MAX_RATIO = 1.3, 2.3
-local DB_VERSION = 4                -- bump to discard learned data from older, buggier versions
+local DB_VERSION = 5                -- bump to discard learned data from older, buggier versions
 
 -- Tick intervals that differ from the 3s default and aren't stated in the description.
 local KNOWN_TICK_INTERVALS = {
@@ -100,9 +100,6 @@ local DEFAULTS = {
     labelColor = "white",
     -- Misc
     debug = false,
-    preview = false, -- session-only: reset on every load
-    previewPercent = 100,
-    previewOffInCombat = true,
     -- Accuracy
     waitFirstTick = "off",
 }
@@ -487,6 +484,83 @@ local function plausibleTickAmount(dot, amount, isCrit)
     return math.abs(amount - known) <= math.max(1, known * tolerance)
 end
 
+-- Tick size to judge a same-slot collision by: the average of the DoT's earlier ticks, or with fewer than two
+-- ticks the description's per-tick share. Deliberately not the learned size, which is what a collision can
+-- corrupt.
+local function referenceTickSize(dot)
+    if dot.normalTicks > 1 then
+        return (dot.tickSum - dot.lastTickAmount) / (dot.normalTicks - 1)
+    end
+    return dot.total / dot.totalTicks
+end
+
+local function saveLearnedTick(dot)
+    if dot.tickKey and dot.normalTicks > 0 then
+        db.ticks[dot.tickKey] = math.floor(dot.tickSum / dot.normalTicks * 10 + 0.5) / 10
+    end
+end
+
+-- Moves a DoT's tick bookkeeping to the tick in slot `index` that landed at `now`.
+local function anchorTick(dot, index, now)
+    dot.missed = 0
+    if dot.firstTickAt then
+        dot.lastTickIndex = index
+    else
+        dot.firstTickAt, dot.lastTickIndex = now, 0
+    end
+    dot.lastTickAt = now
+    dot.nextTickAt = now + dot.interval
+    -- Re-anchor expiry on the observed tick: ticks arrive slightly after their nominal time, and an
+    -- expiry based on the cast event would otherwise cut off the final tick.
+    local tickIndex = math.max(1, math.floor((now - dot.appliedAt) / dot.interval + 0.5))
+    dot.expiresAt = now + (dot.totalTicks - tickIndex) * dot.interval
+    return tickIndex
+end
+
+-- Two same-school hits in one tick slot (e.g. Shadow Bolt landing with a Corruption tick, log 123506.4): the
+-- first one was taken as the tick. If this one is closer to the expected size, it was the real tick.
+local SAME_SLOT_SECONDS = 0.2
+local function trySwapSameSlot(dot, name, amount, isCrit, now)
+    if isCrit or dot.lastTickCrit or not dot.lastTickAt or now - dot.lastTickAt > SAME_SLOT_SECONDS then
+        return false
+    end
+    local reference = referenceTickSize(dot)
+    if math.abs(amount - reference) >= math.abs(dot.lastTickAmount - reference) then return false end
+    trace(string.format("SWAP %s tick: %d was another hit, %d is the tick", name, dot.lastTickAmount, amount))
+    dot.tickSum = dot.tickSum - dot.lastTickAmount + amount
+    dot.lastTickAmount = amount
+    saveLearnedTick(dot)
+    return true
+end
+
+-- A learned size that's wrong rejects every real tick (log: Corruption learned 29 from Shadow Bolts, real ticks
+-- 10-11, every cast dropped). Hits rejected only on size, but landing on the DoT's rhythm in two consecutive
+-- slots and agreeing with each other, are the real ticks: relearn from them.
+local function tryRelearn(dot, name, amount, isCrit, index, distance, now)
+    local window = dot.firstTickAt and TICK_MATCH_WINDOW_ANCHORED or TICK_MATCH_WINDOW
+    local freshSlot = not dot.firstTickAt or index > dot.lastTickIndex
+    if isCrit or not freshSlot or distance > window then return false end
+    local previous = dot.offBeatCandidate
+    dot.offBeatCandidate = { index = index, amount = amount, at = now }
+    if not previous or index ~= previous.index + 1
+        or math.abs(amount - previous.amount) > math.max(1, previous.amount * TICK_AMOUNT_TOLERANCE) then
+        return false
+    end
+    trace(string.format("RELEARN %s: ticks of %d and %d on its rhythm didn't fit %.1f/tick", name,
+        previous.amount, amount, expectedTick(dot)))
+    dot.offBeatCandidate = nil
+    dot.tickSum, dot.normalTicks = previous.amount + amount, 2
+    dot.ticksSeen = dot.ticksSeen + 2
+    dot.lastTickAmount, dot.lastTickCrit = amount, false
+    saveLearnedTick(dot)
+    if not dot.firstTickAt then
+        dot.firstTickAt, dot.lastTickIndex = previous.at, 0
+        index = 1
+    end
+    anchorTick(dot, index, now)
+    return true
+end
+
 -- Returns the target key when this hit was the first tick of a DoT that was waiting for it (so the display
 -- can flash now that the DoT shows), else nil.
 local lastCombatSignature
@@ -522,6 +596,17 @@ local function onUnitCombat(unit, action, flag, amount, school)
         end
     end
     if not best then
+        -- Not a tick as things stand; it may still correct one (same-slot swap, or a wrong learned size).
+        for name, dot in pairs(dots) do
+            if dot.school == school then
+                local distance, index = distanceToExpectedTick(dot, now)
+                local wasWaiting = isWaiting(dot)
+                if trySwapSameSlot(dot, name, amount, isCrit, now) then return end
+                if tryRelearn(dot, name, amount, isCrit, index, distance, now) then
+                    return wasWaiting and key or nil
+                end
+            end
+        end
         trace(string.format("HIT %d%s school %d on %s not matched to a DoT", amount, isCrit and " (crit)" or "",
             school, unit))
         return
@@ -529,25 +614,14 @@ local function onUnitCombat(unit, action, flag, amount, school)
 
     local wasWaiting = isWaiting(best)
     best.ticksSeen = best.ticksSeen + 1
+    best.lastTickAmount, best.lastTickCrit = amount, isCrit
+    best.offBeatCandidate = nil
     if not isCrit then
         best.tickSum = best.tickSum + amount
         best.normalTicks = best.normalTicks + 1
-        if best.tickKey then
-            db.ticks[best.tickKey] = math.floor(best.tickSum / best.normalTicks * 10 + 0.5) / 10
-        end
+        saveLearnedTick(best)
     end
-    best.missed = 0
-    if best.firstTickAt then
-        best.lastTickIndex = bestIndex
-    else
-        best.firstTickAt, best.lastTickIndex = now, 0
-    end
-    best.lastTickAt = now
-    best.nextTickAt = now + best.interval
-    -- Re-anchor expiry on the observed tick: ticks arrive slightly after their nominal time, and an
-    -- expiry based on the cast event would otherwise cut off the final tick.
-    local tickIndex = math.max(1, math.floor((now - best.appliedAt) / best.interval + 0.5))
-    best.expiresAt = now + (best.totalTicks - tickIndex) * best.interval
+    local tickIndex = anchorTick(best, bestIndex, now)
     trace(string.format("TICK %s %d%s on %s (tick %d/%d, expecting %.1f/tick)%s", bestName, amount,
         isCrit and " CRIT" or "", unit, tickIndex, best.totalTicks, expectedTick(best),
         wasWaiting and ", now shown" or ""))
@@ -702,6 +776,9 @@ local function colorOf(id, opacityPercent)
 end
 
 local healthBar -- nil if the target frame's health bar wasn't found (markers unavailable)
+-- While the options window is open, the display is attached to its mock target frame (previewHost:
+-- { healthBar, portrait, layerFrame }) and fed its plain numbers (previewState: { health, dots }) instead.
+local previewHost, previewState
 local skullTestUntil -- /did skull forces the skull visible until this time
 
 -- Skull: addon code can't compare DoT damage with (secret) health, but a StatusBar can. We feed it
@@ -1239,12 +1316,17 @@ local function regionName(region)
 end
 
 local function attach()
-    local portrait = findTargetPortrait()
+    local portrait, bar
+    if previewHost then
+        portrait, bar = previewHost.portrait, previewHost.healthBar
+    else
+        portrait, bar = findTargetPortrait(), findTargetHealthBar()
+    end
     skullAnchor = portrait or TargetFrame or UIParent
     plainSkullFrame:ClearAllPoints()
     plainSkullFrame:SetPoint("BOTTOM", skullWindow, "TOP", 0, 4)
 
-    healthBar = findTargetHealthBar()
+    healthBar = bar
     if healthBar then
         remainingBar:ClearAllPoints()
         remainingBar:SetAllPoints(healthBar)
@@ -1289,7 +1371,14 @@ local layerCheckedAt, lastStrata, lastLevel, layerErrorLogged = 0, nil, nil, fal
 local function updateLayering(now)
     if now - layerCheckedAt < LAYER_CHECK_INTERVAL then return end
     layerCheckedAt = now
-    local ok, strata, level = pcall(targetFrameTopLayer)
+    local ok, strata, level
+    if previewHost then
+        -- One strata above the options window: it's a top-level frame, which WoW raises above everything else
+        -- in its own strata (our frames included) when it's shown or clicked. Dropdowns and tooltips sit higher.
+        ok, strata, level = true, "FULLSCREEN", 1
+    else
+        ok, strata, level = pcall(targetFrameTopLayer)
+    end
     if not ok then
         if not layerErrorLogged then
             layerErrorLogged = true
@@ -1375,23 +1464,24 @@ local function refresh()
     end
     plainSkullFrame:Hide()
 
-    -- Preview (options panel): marker and skull on any target, so the look can be tuned out of combat.
-    -- Target health is secret, so the preview fill is a % of the bar's full width, and the skull shows at
-    -- 100% (a kill on a full-health target). Both go through the same widgets as the real display.
-    if db.preview and healthBar and UnitExists("target") then
-        local percent = db.previewPercent
-        skullBar:SetMinMaxValues(0, 100)
-        skullBar:SetValue(percent)
+    -- Options window preview: the real widgets, attached to its mock target frame, fed its plain numbers.
+    -- Same code path as combat, so what you tune there is exactly what you get.
+    if previewHost and previewState then
+        local entries, total = {}, 0
+        for _, dot in ipairs(previewState.dots) do
+            if dot.damage > 0 then
+                table.insert(entries, dot)
+                total = total + dot.damage
+            end
+        end
+        if total <= 0 then return hideAll() end
+        skullBar:SetMinMaxValues(0, math.max(previewState.health, 0.01))
+        skullBar:SetValue(total)
         skullWindow:SetShown(db.showSkull)
         setMarkerScale(100)
         local perDot = db.dotColors ~= "single"
-        local entries = perDot and {
-            { name = "Corruption", school = 32, damage = percent * 0.45 },
-            { name = "Immolate", school = 4, damage = percent * 0.35 },
-            { name = "Serpent Sting", school = 8, damage = percent * 0.2 },
-        } or nil
-        setMarkerValue(percent, "preview", updateSegments(entries))
-        label:SetText(perDot and breakdownText(entries) or string.format("DoTs: preview %d%%", percent))
+        setMarkerValue(total, "preview", updateSegments(perDot and entries or nil))
+        label:SetText(perDot and breakdownText(entries) or string.format("DoTs: %d", math.floor(total + 0.5)))
         showMarkers()
         return
     end
@@ -1430,137 +1520,70 @@ local function refresh()
     end
 end
 
----------------------------------------------------------------------------
--- Options panel (Options > AddOns > DoesItDie, or /did)
----------------------------------------------------------------------------
+-- Runs refresh and reports a Lua error once (log and chat) instead of failing silently every 0.1s: WoW hides
+-- Lua errors by default, so a broken display would otherwise just not draw.
+local reportedErrors = {}
+local function safeRefresh()
+    local ok, err = pcall(refresh)
+    if not ok and not reportedErrors[err] then
+        reportedErrors[err] = true
+        trace("ERROR in display update: " .. tostring(err))
+        print("Display error (logged): " .. tostring(err))
+    end
+end
 
-local optionsCategory
+---------------------------------------------------------------------------
+-- Settings, and what the options window (Options.lua) needs
+---------------------------------------------------------------------------
 
 local function applyDefaults()
     -- Settings from earlier versions.
     if db.showMarkers == nil and db.showLine ~= nil then db.showMarkers = db.showLine end
     db.showLine, db.showRemaining = nil, nil
     db.showFullLine, db.lineThickness, db.lineColor = nil, nil, nil
+    db.preview, db.previewPercent, db.previewOffInCombat = nil, nil, nil
     for key, value in pairs(DEFAULTS) do
         if db[key] == nil then db[key] = value end
     end
 end
 
-local function registerOptions()
-    local category, layout = Settings.RegisterVerticalLayoutCategory("DoesItDie")
+-- ns.db is set on ADDON_LOADED.
+ns.DEFAULTS = DEFAULTS
+ns.lists = {
+    colors = COLOR_PRESETS, icons = SKULL_ICONS, fills = FILL_STYLES, outlines = OUTLINE_STYLES,
+    dashLengths = DASH_LENGTHS, labelPositions = LABEL_POSITIONS, dotColors = DOT_COLOR_MODES, waitModes = WAIT_MODES,
+}
+ns.refresh = safeRefresh
+ns.playFlash = playFlash
+ns.print = print
+ns.trace = trace
 
-    local function addSetting(key, name, varType)
-        return Settings.RegisterAddOnSetting(category, "DOESITDIE_" .. string.upper(key), key, db, varType,
-            name, DEFAULTS[key])
-    end
-    local function header(text)
-        pcall(function() layout:AddInitializer(CreateSettingsListSectionHeaderInitializer(text)) end)
-    end
-    local function button(name, buttonText, onClick, tooltip)
-        pcall(function()
-            layout:AddInitializer(CreateSettingsButtonInitializer(name, buttonText, onClick, tooltip, true))
-        end)
-    end
-    local function checkbox(key, name, tooltip)
-        Settings.CreateCheckbox(category, addSetting(key, name, Settings.VarType.Boolean), tooltip)
-    end
-    local function slider(key, name, min, max, step, tooltip)
-        local options = Settings.CreateSliderOptions(min, max, step)
-        if MinimalSliderWithSteppersMixin then
-            options:SetLabelFormatter(MinimalSliderWithSteppersMixin.Label.Right)
-        end
-        Settings.CreateSlider(category, addSetting(key, name, Settings.VarType.Number), options, tooltip)
-    end
-    local function dropdown(key, name, list, tooltip)
-        local varType = type(list[1].id) == "number" and Settings.VarType.Number or Settings.VarType.String
-        local function getOptions()
-            local container = Settings.CreateControlTextContainer()
-            for _, entry in ipairs(list) do container:Add(entry.id, entry.label) end
-            return container:GetData()
-        end
-        local createDropdown = Settings.CreateDropdown or Settings.CreateDropDown
-        createDropdown(category, addSetting(key, name, varType), getOptions, tooltip)
-    end
-
-    header("Preview")
-    checkbox("preview", "Preview on current target",
-        "Draws the marker and skull on your target so you can tune the look without fighting. "
-            .. "Turns itself off when you reload.")
-    checkbox("previewOffInCombat", "Turn off preview in combat",
-        "Entering combat switches the preview off so the real marker takes over.")
-    slider("previewPercent", "Preview fill %", 0, 100, 5,
-        "How much of the health bar the preview marker covers. The skull appears at 100%.")
-    button("Flash", "Test", playFlash, "Plays the new-DoT flash (needs the marker visible, e.g. preview on).")
-
-    header("Skull")
-    checkbox("showSkull", "Show skull on target portrait",
-        "Shows an icon over the target's portrait when your DoTs on it will kill it.")
-    dropdown("skullIcon", "Icon", SKULL_ICONS)
-    slider("skullSize", "Size", 20, 64, 2)
-    checkbox("skullPulse", "Pulse", "Gently pulses the icon while it's showing.")
-    slider("skullOffsetX", "Horizontal offset", -60, 60, 1, "Pixels right (+) or left (-) of the portrait's center.")
-    slider("skullOffsetY", "Vertical offset", -60, 60, 1, "Pixels up (+) or down (-) from the portrait's center.")
-
-    header("Damage marker")
-    checkbox("showMarkers", "Show damage marker",
-        "Marks the damage your DoTs still have to deal on the target's health bar. "
-            .. "If the health ends inside it, the target dies.")
-    dropdown("waitFirstTick", "Wait for first tick", WAIT_MODES,
-        "Whether a new DoT counts toward the marker (and skull) before its first tick lands. "
-            .. "\"When unsure\" waits only when the starting estimate is shaky: a finisher with unknown combo points, "
-            .. "or a spell the addon hasn't seen tick yet.")
-    dropdown("fillTexture", "Fill style", FILL_STYLES)
-    dropdown("fillColor", "Fill color", COLOR_PRESETS)
-    slider("fillOpacity", "Fill opacity %", 0, 100, 5)
-    dropdown("dotColors", "DoT colors", DOT_COLOR_MODES,
-        "Split the fill into one segment per DoT, colored by spell school or with a different color each. "
-            .. "The damage text then lists each DoT in its color.")
-    checkbox("segmentDividers", "Dividers between DoTs", "Thin dark lines between the per-DoT segments.")
-    dropdown("outlineStyle", "Outline style", OUTLINE_STYLES)
-    dropdown("dashLength", "Dash length", DASH_LENGTHS, "Length of each dash and of the gap between them.")
-    slider("outlineThickness", "Outline thickness", 1, 8, 1)
-    dropdown("outlineColor", "Outline color", COLOR_PRESETS)
-    slider("outlineOpacity", "Outline opacity %", 10, 100, 5)
-
-    header("Animation")
-    checkbox("smoothMotion", "Smooth motion",
-        "The marker grows in when it appears and glides to new values instead of jumping on each tick.")
-    checkbox("flashOnApply", "Flash on new DoT",
-        "Flashes the marker when you apply a DoT to your target (or, for a DoT waiting for its first tick, when "
-            .. "that tick lands).")
-    checkbox("pulseOutline", "Pulse outline", "Slowly pulses the outline (and glow) so it stands out on busy backgrounds.")
-
-    header("Effects")
-    checkbox("showSpark", "Spark", "A bright flare on the marker's leading edge when a DoT lands. Hidden otherwise.")
-    checkbox("showGlow", "Glow", "Soft halo around the marker in the outline color.")
-    slider("glowSize", "Glow size", 2, 16, 1)
-    checkbox("showShine", "Shine sweep", "A light streak runs across the marker every few seconds.")
-    slider("shineInterval", "Shine every (seconds)", 2, 10, 1)
-    checkbox("scrollStripes", "Scroll stripes", "Animates the \"Diagonal stripes\" fill style like a barber pole.")
-
-    header("Damage text")
-    checkbox("showLabel", "Show damage text", "\"DoTs: remaining damage\" next to the health bar.")
-    dropdown("labelPosition", "Position", LABEL_POSITIONS)
-    slider("labelSize", "Size", 8, 20, 1)
-    dropdown("labelColor", "Color", COLOR_PRESETS)
-
-    header("Troubleshooting")
-    checkbox("debug", "Echo trace log to chat", "Prints each DoT cast, matched tick and estimate to chat.")
-    button("Learned tick sizes", "Reset", function()
-        wipe(db.ticks)
-        print("Learned tick sizes cleared.")
-    end, "Forget the tick sizes learned from earlier casts.")
-
-    Settings.RegisterAddOnCategory(category)
-    optionsCategory = category
+function ns.resetLearnedTicks()
+    wipe(db.ticks)
+    print("Learned tick sizes cleared.")
 end
 
-local function openOptions()
-    if optionsCategory then
-        Settings.OpenToCategory(optionsCategory:GetID())
-    else
-        print("Options panel unavailable in this client; see /did help.")
+-- host: { healthBar, portrait, layerFrame } to draw on the options window's mock target frame, or nil to go
+-- back to the real target frame.
+function ns.setDisplayHost(host)
+    trace(host and "PREVIEW on: drawing on the options window" or "PREVIEW off: back on the target frame")
+    previewHost = host
+    layerCheckedAt = 0
+    attach()
+    safeRefresh()
+    if host then
+        -- Where things ended up on screen, once layout has settled (for diagnosing an invisible preview).
+        C_Timer.After(0.5, function()
+            if previewHost ~= host then return end
+            trace("PREVIEW geometry: health bar " .. rectOf(host.healthBar) .. " | marker " .. describeFrame(remainingBar)
+                .. " | icon " .. describeFrame(skullWindow) .. " | window " .. describeFrame(host.layerFrame))
+        end)
     end
+end
+
+-- state: { health = 0-100, dots = { { name, school, damage }, ... } } (damage in % of max health), or nil.
+function ns.setPreviewState(state)
+    previewState = state
 end
 
 ---------------------------------------------------------------------------
@@ -1574,14 +1597,7 @@ frame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
 frame:RegisterUnitEvent("UNIT_SPELLCAST_SENT", "player")   -- combo points, before a finisher spends them
 frame:RegisterUnitEvent("UNIT_POWER_FREQUENT", "player")   -- keeps a recent combo point reading as backup
 frame:RegisterEvent("UNIT_COMBAT")
-frame:RegisterEvent("PLAYER_REGEN_DISABLED")
 -- Never register COMBAT_LOG_EVENT_UNFILTERED: Forever forbids it and shows a "blocked" popup.
-
--- Turns the preview off through the settings system when possible, so an open options panel updates too.
-local function stopPreview()
-    local ok = pcall(function() Settings.GetSetting("DOESITDIE_PREVIEW"):SetValue(false) end)
-    if not ok then db.preview = false end
-end
 
 frame:SetScript("OnEvent", function(self, event, ...)
     if event == "ADDON_LOADED" then
@@ -1594,14 +1610,14 @@ frame:SetScript("OnEvent", function(self, event, ...)
         db.ticks = db.ticks or {}
         db.log = db.log or {}
         applyDefaults()
-        db.preview = false
+        ns.db = db
         trace("===== session start =====")
-        local ok, err = pcall(registerOptions)
+        local ok, err = pcall(ns.registerOptions)
         if not ok then
             trace("Options panel registration failed: " .. tostring(err))
             print("Couldn't create the options panel; slash commands still work (/did help).")
         end
-        if not attach() then print("Target portrait not found; skull shown beside the target frame.") end
+        if not attach() then print("Target portrait not found; kill icon shown beside the target frame.") end
         self:UnregisterEvent("ADDON_LOADED")
 
     elseif not db then
@@ -1613,7 +1629,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
         forgetPendingOutcomes()
         lastTracedDamage = nil
         trace("TARGET changed to " .. (unitKey("target") or "none"))
-        refresh()
+        safeRefresh()
 
     elseif event == "UNIT_SPELLCAST_SENT" then
         local _, _, _, spellID = ...
@@ -1626,22 +1642,15 @@ frame:SetScript("OnEvent", function(self, event, ...)
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
         local _, _, spellID = ...
         local appliedTo, waiting = onPlayerCast(spellID)
-        refresh()
+        safeRefresh()
         -- A DoT waiting for its first tick isn't drawn yet; it flashes when that tick lands instead.
         if appliedTo and not waiting and appliedTo == unitKey("target") then playFlash() end
 
     elseif event == "UNIT_COMBAT" then
         local revealed = onUnitCombat(...)
         if revealed and revealed == unitKey("target") then
-            refresh()
+            safeRefresh()
             playFlash()
-        end
-
-    elseif event == "PLAYER_REGEN_DISABLED" then
-        if db.preview and db.previewOffInCombat then
-            stopPreview()
-            print("Preview turned off (entered combat).")
-            refresh()
         end
     end
 end)
@@ -1652,7 +1661,7 @@ frame:SetScript("OnUpdate", function(self, elapsed)
     sinceUpdate = sinceUpdate + elapsed
     if sinceUpdate < UPDATE_INTERVAL or not db then return end
     sinceUpdate = 0
-    refresh()
+    safeRefresh()
 end)
 
 ---------------------------------------------------------------------------
@@ -1664,7 +1673,7 @@ SLASH_DOESITDIE2 = "/doesitdie"
 SlashCmdList.DOESITDIE = function(msg)
     local cmd = strlower(strtrim(msg or ""))
     if cmd == "" or cmd == "options" or cmd == "config" then
-        openOptions()
+        ns.openOptions()
     elseif cmd == "line" then
         db.showMarkers = not db.showMarkers
         if db.showMarkers and not healthBar then
@@ -1674,7 +1683,7 @@ SlashCmdList.DOESITDIE = function(msg)
         end
     elseif cmd == "skull" then
         skullTestUntil = GetTime() + 5
-        print("Skull test for 5 seconds: one skull ON the portrait (the real one) and one ABOVE it (plain test).")
+        print("Kill icon test for 5 seconds: one icon ON the portrait (the real one) and one ABOVE it (plain test).")
         C_Timer.After(0.5, traceSkullGeometry)
     elseif cmd == "debug" then
         db.debug = not db.debug
@@ -1683,10 +1692,10 @@ SlashCmdList.DOESITDIE = function(msg)
         wipe(db.ticks)
         print("Learned tick sizes cleared.")
     else
-        print("A skull on the target's portrait means your DoTs will kill it.")
-        print("/did - open the options panel")
+        print("The kill icon on the target's portrait means your DoTs will kill it.")
+        print("/did - open the options window")
         print("/did line - toggle health bar markers on/off")
-        print("/did skull - show the skull for 5 seconds to check its position")
+        print("/did skull - show the kill icon for 5 seconds to check its position")
         print("/did debug - toggle echoing the trace log (casts, ticks, estimates) to chat")
         print("/did reset - forget learned tick sizes")
     end

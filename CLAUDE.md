@@ -5,9 +5,11 @@ current target and shows whether they will finish it off:
 
 - a **damage marker** on the target frame's health bar, covering the damage the DoTs still have to deal
   (if the green health ends inside it, the target dies), and
-- a **skull** on the target's portrait when the DoTs are lethal.
+- a **kill icon** on the target's portrait when the DoTs are lethal (skull, X, checkmark or sunglasses; the
+  code still calls it the "skull").
 
-Both are styled from an options panel (`/did`). The project folder is still called `WillItDie` (the addon's
+Both are styled from the addon's own options window (`/did`), which has a live preview: while it's open, the
+real marker and icon are attached to a mock target frame inside it and fed the preview's plain numbers. The project folder is still called `WillItDie` (the addon's
 original name); everything inside the addon is `DoesItDie`.
 
 ## Why it's built the way it is: Forever's addon restrictions
@@ -40,7 +42,8 @@ Consequences for the design:
 
 | Path | What |
 |---|---|
-| `DoesItDie/DoesItDie.lua` | The whole addon, in sections: constants and tables, helpers, description parsing, DoT tracking (combo points, cast outcomes, tick matching), display, options panel, events, slash commands |
+| `DoesItDie/DoesItDie.lua` | The addon, in sections: constants and tables, helpers, description parsing, DoT tracking (combo points, cast outcomes, tick matching), display, settings and what `Options.lua` needs (`ns.*`), events, slash commands |
+| `DoesItDie/Options.lua` | The options window: live preview with a mock target frame, tabs, presets, hand-built controls; plus a small page in Options > AddOns that opens it. Shares data with `DoesItDie.lua` through the addon namespace (`local _, ns = ...`) |
 | `DoesItDie/Textures/` | Generated TGAs: patterns (dashes, stripes, spark, shine) and the sunglasses icon |
 | `tools/make_textures.py` | Regenerates the textures |
 | `tools/scrape_forever_spellbook.py` | Scrapes all nine class spellbooks from foreverchanges.pro into `tools/data/forever_spellbook.json` |
@@ -48,6 +51,7 @@ Consequences for the design:
 | `tools/test_spellbook.py` | Runs every scraped Forever damage tooltip through the parser and compares with a reviewed snapshot (`tools/data/spellbook_expected.json`) |
 | `tools/test_tracking.py` | Plays scripted fights through the real tracking code with game APIs stubbed: tick matching, dodges/misses, recasts, combo points, first-tick waiting. Includes replays of real in-game logs |
 | `tools/test_display.py` | Loads the real display code with mocked frames and checks the per-DoT segments (running totals, colors, dividers, text breakdown) |
+| `tools/test_load.py` | Smoke test: loads every file in the .toc with a fake WoW environment and drives it like a player (load, `/did`, tabs, presets, controls, Simulate fight, close). Catches runtime errors, not visual ones |
 | `WillItDieProbe/` | The original diagnostic addon that established the restrictions above. Not linked into the game any more |
 
 ## How the tracking works (high level)
@@ -77,9 +81,9 @@ Tuning constants (tick windows, tolerances, fallbacks) are at the top of `DoesIt
   last 500 lines), written on reload or logout to
   `…\_classic_beta_\WTF\Account\<account>\SavedVariables\DoesItDie.lua`. Reading this after the user plays is
   the main debugging loop. `/did debug` echoes the log to chat.
-- **Slash commands:** `/did` (options), `/did skull` (5-second skull test with geometry logged), `/did line`,
+- **Slash commands:** `/did` (options window), `/did skull` (5-second kill icon test with geometry logged), `/did line`,
   `/did debug`, `/did reset` (forget learned tick sizes).
-- **Tests:** `pip install lupa`, then run the four `tools/test_*.py` scripts (use `--update` on
+- **Tests:** `pip install lupa`, then run the five `tools/test_*.py` scripts (use `--update` on
   `test_spellbook.py` only after reviewing a change). There's no Lua install; `luaparser` (pip) works as a
   syntax check.
 - **Gotchas:**
@@ -88,6 +92,8 @@ Tuning constants (tick windows, tolerances, fallbacks) are at the top of `DoesIt
     `"Interface\\Buttons\\WHITE8X8"`. Edit Lua with file tools, and grep `Interface` after scripted edits.
   - Guard every value that might be secret with `isSecret()` before comparing or indexing with it.
   - Bump `DB_VERSION` when learned tick data from older versions would be wrong.
+  - Lua allows 200 locals per function scope, including a file's top level. `DoesItDie.lua` is around 170,
+    so new features with many top-level locals belong in a new file (added to the .toc) sharing `ns`.
 
 ## Status
 

@@ -47,6 +47,7 @@ function api.reset(waitMode)
     log = {}
 end
 function api.learn(spellID, perTick) db.ticks[spellID] = perTick end
+function api.learned(spellID) return db.ticks[spellID] end
 function api.cast(spellID) onCastSent(spellID); return onPlayerCast(spellID) end
 function api.hit(amount, school, flag) return onUnitCombat("target", "WOUND", flag or "", amount, school or 1) end
 function api.avoid(action) onUnitCombat("target", action, "", 0, 1) end
@@ -90,6 +91,29 @@ check("  combo point taken back", sim.counted(), 0)
 
 sim.reset(); sim.learn(1, 10); sim.avoid("MISS"); sim.advance(0.1); sim.cast(1)
 check("Miss arrives just BEFORE the cast event: dropped", sim.marker(), "0 dmg from 0 DoT(s)")
+
+# Replay of log 123506.4: first Corruption of the session (nothing learned). At its first tick a Shadow Bolt
+# (26) and the real tick (10) land in the same instant, bolt first. Previously 26 was learned as the tick size.
+sim.reset(); sim.cast(1); sim.advance(3.0); sim.hit(26, 32); sim.hit(10, 32)
+check("Replay: Shadow Bolt + tick in the same instant: the 10 is the tick", sim.marker(), "30 dmg from 1 DoT(s)")
+check("  log shows the swap", "SWAP Corruption tick: 26 was another hit, 10 is the tick" in sim.log(), True)
+sim.reset(); sim.learn(1, 10); sim.cast(1); sim.advance(3.0); sim.hit(10, 32); sim.hit(26, 32)
+check("  tick first, bolt second: no swap", sim.marker(), "30 dmg from 1 DoT(s)")
+
+# Replay of the rest of that log: Corruption had learned 29 (from Shadow Bolts), so every real tick of 10-11
+# was rejected and each cast was dropped as "never ticked". Two on-rhythm ticks now relearn it.
+sim.reset(); sim.learn(1, 29); sim.cast(1)
+sim.advance(3.0); sim.hit(11, 32)
+check("Replay: learned 29, first real tick (11) still rejected", sim.marker(), "116 dmg from 1 DoT(s)")
+sim.advance(3.0); sim.hit(10, 32)
+check("  second on-rhythm tick (10): relearned, not dropped", sim.marker(), "21 dmg from 1 DoT(s)")
+check("  and the saved tick size is fixed", sim.learned(1), 10.5)
+sim.advance(3.0); sim.hit(11, 32)
+check("  next tick matches normally", sim.marker(), "11 dmg from 1 DoT(s)")
+
+sim.reset(); sim.learn(1, 10); sim.cast(1)
+sim.advance(1.0); sim.hit(26, 32); sim.advance(1.0); sim.hit(27, 32)
+check("Two off-rhythm Shadow Bolts don't trigger a relearn", sim.learned(1), 10)
 
 # Replay of the in-game miss (log 99223.7): 2-point Rip missed, white hits of 20-22 kept landing near tick
 # times. Previously a white hit at +2.6s "proved" the Rip and brought it back.
