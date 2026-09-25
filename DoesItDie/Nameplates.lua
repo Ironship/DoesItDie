@@ -127,16 +127,30 @@ local function createWidgets(plate, healthBar)
     w.icon = w.iconBar:CreateTexture(nil, "OVERLAY")
     w.icon:SetPoint("RIGHT", w.iconBar:GetStatusBarTexture(), "RIGHT")
 
-    -- Above the plate's health bar. Its level can be secret in Forever; then use a fixed high level.
+    widgetsByPlate[plate] = w
+    return w
+end
+
+-- Above the plate's health bar, in its strata. Done on every draw, not only when the widgets are made:
+-- the client re-levels plates while they live (the target's, overlapping ones), and with some of
+-- Blizzard's nameplate settings the bar then ended above a marker levelled once, covering it. Its level
+-- can be secret in Forever; then a fixed high level.
+local function keepAbove(w)
+    local healthBar = w.healthBar
     local ok, level = pcall(healthBar.GetFrameLevel, healthBar)
     if not ok or isSecret(level) or type(level) ~= "number" then level = FALLBACK_LEVEL end
+    local okStrata, strata = pcall(healthBar.GetFrameStrata, healthBar)
+    if not okStrata or isSecret(strata) or type(strata) ~= "string" then strata = nil end
+    if level == w.barLevel and strata == w.barStrata then return end
+    w.barLevel, w.barStrata = level, strata
+    if strata then
+        w.marker:SetFrameStrata(strata)
+        w.iconWindow:SetFrameStrata(strata)
+    end
     -- The icon sits well above: plate decorations beside the bar (the level badge) must not cover it.
     w.marker:SetFrameLevel(level + 5)
     w.iconWindow:SetFrameLevel(level + 20)
     w.iconBar:SetFrameLevel(level + 21)
-
-    widgetsByPlate[plate] = w
-    return w
 end
 
 -- Nameplates have their own look (plate* settings), separate from the target marker: enemy plates are red.
@@ -216,6 +230,7 @@ end
 -- Draws one plate's widgets. maxHealth and health may be secret (real plates) or plain (the options preview):
 -- they only ever go into StatusBar min/max, never into Lua math. Returns false if drawing failed.
 local function drawPlate(w, entries, total, maxHealth, health, db)
+    keepAbove(w)
     applyStyle(w, db)
     local perDot = db.plateDotColors ~= "single"
     local count = perDot and math.min(#entries, MAX_SEGMENTS) or 0
@@ -386,6 +401,24 @@ local function probePlate(unit, index)
     table.insert(parts, "healthBar=" .. path)
     if healthBar then
         table.insert(parts, "barForbidden=" .. tostring(healthBar.IsForbidden and healthBar:IsForbidden() or false))
+    end
+    -- Where the marker has to be drawn above: the frame levels and strata of the plate, its unit frame, the
+    -- bar, the bar's own child frames, and the marker if there is one.
+    local function layer(name, f)
+        if type(f) ~= "table" then return end
+        table.insert(parts, name .. "=" .. call(f.GetFrameStrata, f) .. "/" .. call(f.GetFrameLevel, f))
+    end
+    layer("plateLayer", plate)
+    layer("unitFrameLayer", plate.UnitFrame)
+    layer("barLayer", healthBar)
+    if healthBar and healthBar.GetChildren then
+        local children = { pcall(healthBar.GetChildren, healthBar) }
+        for i = 2, #children do layer("barChild" .. (i - 1), children[i]) end
+    end
+    local w = widgetsByPlate[plate]
+    if w then
+        layer("markerLayer", w.marker)
+        table.insert(parts, "markerShown=" .. call(w.marker.IsShown, w.marker))
     end
 
     local bar = testBar(index)
