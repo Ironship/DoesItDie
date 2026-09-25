@@ -1,8 +1,8 @@
 -- Feeds every English and German description in tools/data/locale_cases.lua through the addon's real parser
--- (parseDot and the name-keyed tables, cut out of DoesItDie/DoesItDie.lua, with Locale.lua loaded first) and
--- checks total, school, duration, tick interval, ignore list and tick shape against values read from the text by
--- tools/make_locale_cases.py. Also checks that every English description parses exactly as the v0.5.0 parser
--- (tools/data/upstream_parser_v0.5.0.lua) did.
+-- (parseDot and the name-keyed tables, cut out of DoesItDie/DoesItDie.lua, with Locale.lua and the languages
+-- loaded first) and checks total, school, duration, tick interval, ignore list and tick shape against the values
+-- stated there. Also checks that every English description parses exactly as the v0.5.0 parser
+-- (tools/data/upstream_parser_v0.5.0.lua) did, and that a second registered language is consulted too.
 --
 --     lua tools/test_locale.lua                      (any Lua 5.1+; WoW runs 5.1: python tools/test_locale.py)
 --     lua tools/test_locale.lua path/to/DoesItDie.lua   (another copy of the addon, e.g. the unmodified one)
@@ -22,9 +22,14 @@ local function run(code, name, ...)
     return assert(loadString(code, "@" .. name))(...)
 end
 
--- The addon: Locale.lua, then the parser chunks of DoesItDie.lua (same cut as tools/test_parse.py).
+-- The addon: the files before DoesItDie.lua in the .toc (Locale.lua and the languages), then the parser chunks of
+-- DoesItDie.lua (same cut as tools/test_parse.py).
 local ns = {}
-run(readFile(root .. "/DoesItDie/Locale.lua"), "Locale.lua", "DoesItDie", ns)
+for line in readFile(root .. "/DoesItDie/DoesItDie.toc"):gmatch("[^\n]+") do
+    local name = line:match("^%s*(.-%.lua)%s*$")
+    if name == "DoesItDie.lua" then break end
+    if name then run(readFile(root .. "/DoesItDie/" .. name), name, "DoesItDie", ns) end
+end
 local src = readFile(source)
 local function chunk(startMarker, endMarker)
     local first = assert(src:find(startMarker, 1, true), startMarker)
@@ -45,7 +50,7 @@ local upstreamParse = run(readFile(root .. "/tools/data/upstream_parser_v0.5.0.l
 local cases = run(readFile(root .. "/tools/data/locale_cases.lua"), "locale_cases.lua")
 
 local passed, failed, shown = 0, 0, 0
-local failedByLang = { en = 0, de = 0 }
+local failedByLang = { en = 0, de = 0, other = 0 }
 local function check(case, what, actual, expected)
     if actual == expected then
         passed = passed + 1
@@ -144,8 +149,38 @@ for _, case in ipairs({
     checkReading(case, "", track(case), nil)
 end
 
+-- The registry isn't bound to German: a second language registered after it is consulted too, for descriptions,
+-- finishers, combo points and names, and German still reads its own text.
+ns.locale.register({
+    tag = "xxXX",
+    parseDot = function(desc)
+        local total, secs = desc:match("^Zorg (%d+) blub (%d+)$")
+        if total then return tonumber(total), 4, tonumber(secs) end
+    end,
+    isFinisher = function(desc) return desc:find("^Zorgfinish") ~= nil end,
+    comboPointsAwarded = function(desc) return tonumber(desc:match("Zorgpunkt (%d+)")) end,
+    names = { ["Insect Swarm"] = { "Zwarm" }, ["Mind Flay"] = { "Zinnschinden" } },
+})
+do
+    local case = { lang = "other", source = "stub", name = "second language", id = 0 }
+    local total, school, duration = addon.parseDot("Zorg 50 blub 10")
+    check(case, "total", total, 50)
+    check(case, "school", school, 4)
+    check(case, "duration", duration, 10)
+    check(case, "German still read", (addon.parseDot("verursacht 12 Sek. lang 40 Punkt(e) Schattenschaden.")), 40)
+    check(case, "English still read", (addon.parseDot("causing 72 Shadow damage over 24 sec.")), 72)
+    check(case, "finisher", ns.locale.isFinisher("Zorgfinish 3"), true)
+    check(case, "not a finisher", ns.locale.isFinisher("Zorg 50 blub 10"), false)
+    check(case, "combo points awarded", ns.locale.comboPointsAwarded("Zorgpunkt 2"), 2)
+    check(case, "German combo points", ns.locale.comboPointsAwarded("Gewährt 1 Combopunkt."), 1)
+    ns.locale.addNames(addon.nameTables)
+    check(case, "Zwarm interval", addon.intervals["Zwarm"], 2)
+    check(case, "Zinnschinden ignored", addon.ignored["Zinnschinden"], true)
+end
+
 if shown > 40 then print(string.format("... and %d more failures", shown - 40)) end
 print(string.format("%d English and %d German descriptions from %s", counts.en, counts.de, source))
-print(string.format("%d checks passed, %d failed (English %d, German %d)", passed, failed, failedByLang.en, failedByLang.de))
+print(string.format("%d checks passed, %d failed (English %d, German %d, registry %d)", passed, failed,
+    failedByLang.en, failedByLang.de, failedByLang.other))
 if TEST_NO_EXIT then return failed end
 os.exit(failed == 0 and 0 or 1)

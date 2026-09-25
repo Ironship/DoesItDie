@@ -65,10 +65,10 @@ local IGNORED_SPELLS = {
     ["Immolation Trap"] = true, ["Explosive Trap"] = true, ["Wyvern Sting"] = true,
 }
 
--- The name-keyed tables also answer to the German names, and on ADDON_LOADED to the names this client reports
--- for them (Locale.lua).
+-- The name-keyed tables also answer to the names of every registered language, and on ADDON_LOADED to the names
+-- this client reports for them (Locale.lua).
 local NAME_TABLES = { KNOWN_TICK_INTERVALS, TICK_SHAPES, SCHOOL_BY_NAME, IGNORED_SPELLS }
-ns.locale.addGermanNames(NAME_TABLES)
+ns.locale.addNames(NAME_TABLES)
 
 local SCHOOL_MASKS = {
     Physical = 1, Holy = 2, Fire = 4, Nature = 8, Frost = 16, Shadow = 32, Arcane = 64,
@@ -269,7 +269,7 @@ local function parseDot(desc, comboPoints)
             return tonumber(amount) * math.floor(lasts / every + 0.5), schoolFromWords(words), lasts, every
         end
     end
-    -- Not English DoT wording: try the other languages (Locale.lua).
+    -- Not English DoT wording: try the registered languages (Locale.lua).
     return ns.locale.parseDot(desc, comboPoints or 5)
 end
 

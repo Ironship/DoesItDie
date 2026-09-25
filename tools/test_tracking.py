@@ -11,9 +11,13 @@ from lupa import LuaRuntime
 
 SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "DoesItDie", "DoesItDie.lua")
 src = open(SRC, encoding="utf-8").read()
-# Locale.lua loads first in the .toc and puts ns.locale on the namespace the chunks below use.
-LOCALE = open(os.path.join(os.path.dirname(SRC), "Locale.lua"), encoding="utf-8").read()
-LOCALE_PRELUDE = "local ns = {}\n(function(...)\n" + LOCALE + "\nend)(\"DoesItDie\", ns)\n"
+# The files before DoesItDie.lua in the .toc (Locale.lua and the languages) put ns.locale on the namespace the
+# chunks below use.
+TOC = [line.strip() for line in open(os.path.join(os.path.dirname(SRC), "DoesItDie.toc"), encoding="utf-8")]
+LOCALE_PRELUDE = "local ns = {}\n" + "".join(
+    ";(function(...)\n" + open(os.path.join(os.path.dirname(SRC), name), encoding="utf-8").read()
+    + "\nend)(\"DoesItDie\", ns)\n"
+    for name in TOC[:TOC.index("DoesItDie.lua")] if name.endswith(".lua"))
 
 
 def chunk(start_marker, end_marker):
