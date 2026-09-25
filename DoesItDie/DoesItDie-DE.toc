@@ -1,0 +1,11 @@
+## Interface: 16001
+## Title: DoesItDie (DE)
+## Notes: Also reads German spell descriptions. Tracks your DoTs and marks the damage they still have left on your target's health bar, with a kill icon on the portrait when they'll finish it off. Fully customizable look (/did).
+## Author: Joe Greive
+## Version: v0.5.0-de1
+## SavedVariables: DoesItDieDB
+
+Locale.lua
+DoesItDie.lua
+Options.lua
+Nameplates.lua
