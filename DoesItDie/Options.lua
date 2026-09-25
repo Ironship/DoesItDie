@@ -109,7 +109,10 @@ end
 -- The preview only takes over the display out of combat: in combat the real target comes first, even with the
 -- window open (settings changes still apply to it live).
 local function syncDisplayHost()
-    if not window or not window:IsShown() then return end
+    -- Visible, not just shown: when the window is built into another addon's settings (BattleInfoTool), its
+    -- own frame stays "shown" while the settings around it are closed, and the end of a fight then put the
+    -- marker back on the preview's mock target frame, drawn where the closed window had been.
+    if not window or not window:IsVisible() then return end
     local paused = inCombat() and true or false
     window.combatNote:SetShown(paused)
     window.mock:SetAlpha(paused and 0.3 or 1)
