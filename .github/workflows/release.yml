@@ -6,6 +6,9 @@ on:
   push:
     tags:
       - "v*"
+      # This fork's German builds (v0.5.0-de2 ...) are packaged by hand as DoesItDie-DE and
+      # attached to the fork's own GitHub release; the packager would add an upstream-layout zip.
+      - "!v*-de*"
 
 jobs:
   release:
