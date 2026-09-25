@@ -613,8 +613,20 @@ local function referenceTickSize(dot)
     return dot.total / dot.totalTicks
 end
 
+-- Resurrection Sickness cuts the player's damage to a quarter while it lasts. Ticks under it are real and this
+-- DoT follows them, but they are not the size to keep: kept, every cast after the sickness started from a quarter
+-- of its real ticks, rejected them, and only came right after two of them relearned it.
+local RESURRECTION_SICKNESS = 15007
+local function playerIsSick()
+    local get = C_UnitAuras and C_UnitAuras.GetPlayerAuraBySpellID
+    if type(get) ~= "function" then return false end
+    local ok, aura = pcall(get, RESURRECTION_SICKNESS)
+    if not ok or isSecret(aura) then return false end
+    return aura ~= nil
+end
+
 local function saveLearnedTick(dot)
-    if dot.tickKey and dot.normalTicks > 0 then
+    if dot.tickKey and dot.normalTicks > 0 and not playerIsSick() then
         db.ticks[dot.tickKey] = math.floor(dot.tickSum / dot.normalTicks * 10 + 0.5) / 10
     end
 end

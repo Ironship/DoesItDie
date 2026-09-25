@@ -53,6 +53,8 @@ local SPELLS = {
     [10] = { "Feuerregen","Lässt einen feurigen Regen niedergehen, der 8 Sek. lang Feinde im Wirkungsbereich mit 168 Punkt(en) Feuerschaden verbrennt." },
 }
 local function spellNameAndDescription(id) return SPELLS[id][1], SPELLS[id][2] end
+sick = false -- Resurrection Sickness on the player
+C_UnitAuras = { GetPlayerAuraBySpellID = function(id) if sick and id == 15007 then return { spellId = 15007 } end end }
 """ + chunk("local UPDATE_INTERVAL", "-- User options") + chunk(
     "local function schoolFromWords", "---------------------------------------------------------------------------\n-- Display") + """
 local api = {}
@@ -68,6 +70,7 @@ function api.reset(waitMode, estimateDuringCast)
 end
 function api.learn(spellID, perTick) db.ticks[spellID] = perTick end
 function api.learned(spellID) return db.ticks[spellID] end
+function api.sick(on) sick = on end
 function api.cast(spellID) onCastSent(spellID); return onPlayerCast(spellID) end
 -- A cast with a cast time, event by event as the addon's handler runs them. The handlers are looked up by name,
 -- so without the feature these do nothing (and the checks below fail instead of erroring).
@@ -124,6 +127,17 @@ check("  combo point taken back", sim.counted(), 0)
 
 sim.reset(); sim.learn(1, 10); sim.avoid("MISS"); sim.advance(0.1); sim.cast(1)
 check("Miss arrives just BEFORE the cast event: dropped", sim.marker(), "0 dmg from 0 DoT(s)")
+
+# Resurrection Sickness: ticks at a quarter while it lasts are followed for this DoT, not kept for later casts.
+sim.reset(); sim.learn(1, 10); sim.sick(True); sim.cast(1)
+sim.advance(3); sim.hit(3, 32); sim.advance(3); sim.hit(3, 32)
+check("sick: two quarter-size ticks, relearned for this DoT", sim.marker(), "6 dmg from 1 DoT(s)")
+check("  but the size kept for later casts stays the real one", sim.learned(1), 10)
+sim.sick(False); sim.advance(10); sim.cast(1)
+check("  well again: the next Corruption starts from the real size", sim.marker(), "40 dmg from 1 DoT(s)")
+sim.advance(3); sim.hit(10, 32)
+check("  and its real ticks match", sim.marker(), "30 dmg from 1 DoT(s)")
+sim.sick(False)
 
 # Replay of log 123506.4: first Corruption of the session (nothing learned). At its first tick a Shadow Bolt
 # (26) and the real tick (10) land in the same instant, bolt first. Previously 26 was learned as the tick size.
