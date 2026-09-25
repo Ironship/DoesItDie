@@ -1,17 +1,14 @@
 # DoesItDie (DE)
 
-A fork of [DoesItDie](https://github.com/swirllyman/DoesItDie) by Joe Greive (swirllyman), a WoW: Forever addon
-that marks on the target's health bar the damage your DoTs still have to deal. All of the addon is his work and
-stays under his MIT licence (see `LICENSE`).
+[DoesItDie](https://github.com/swirllyman/DoesItDie) by Joe Greive (swirllyman) is a WoW: Forever addon that marks on the target's health bar the damage your DoTs still have to deal.
 
-This branch makes it work on a German client. `DoesItDie/Locale.lua` reads German spell descriptions
-("verursacht 12 Sek. lang 40 Punkt(e) Schattenschaden", "1.132", "7,1 Sek.") and gives the name-keyed tables
-their German names, plus whatever name the client reports for each spell ID. English descriptions are read
-exactly as before: the English patterns run first and are unchanged.
+What this fork changes:
 
-Install the `DoesItDie` folder as `Interface\AddOns\DoesItDie-DE` (it loads `DoesItDie-DE.toc`, shown as
-"DoesItDie (DE)"), and remove the original `DoesItDie` so the two don't both load.
+- It reads German spell descriptions, so it works on a German client; English works as before.
+- An "Estimate during casting" option (on by default) shows a DoT with a cast time while you are still casting it.
+- It installs as `DoesItDie-DE`, shown as "DoesItDie (DE)", so the CurseForge app does not replace it with the original.
+- Its settings are saved in their own file (`DoesItDie-DE.lua`), separate from the original's.
 
-Tests: `python tools/test_locale.py` (Lua 5.1 through lupa) or `lua tools/test_locale.lua` runs 340 German and
-340 English descriptions through the parser; `python tools/make_locale_cases.py` rebuilds its cases from
-`tools/data/spell_descriptions.json`. The other `tools/test_*.py` scripts work as upstream.
+Install: unzip `DoesItDie-DE-<version>.zip` from [Releases](https://github.com/Ironship/DoesItDie/releases) into `Interface\AddOns` and disable the original DoesItDie.
+
+Licence: MIT, like the original (see `LICENSE`).
