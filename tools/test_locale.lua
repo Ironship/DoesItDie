@@ -133,6 +133,17 @@ else
     print("FAIL  no NAME_TABLES in " .. source)
 end
 
+-- German buffs and debuffs whose duration stands before direct damage aren't DoTs (Classic Era deDE, Wowhead).
+-- Their English text isn't read either.
+for _, case in ipairs({
+    { lang = "de", source = "wowhead", name = "Donnerknall", id = 11581,
+      desc = "Dröhnt in der Nähe befindliche Feinde mit Donner zu, erhöht die Zeit zwischen ihren Angriffen 30 Sek. lang um 10% und fügt ihnen 103 Schaden zu. Wirkt auf maximal 4 Ziele." },
+    { lang = "de", source = "wowhead", name = "Heiliger Schild", id = 20928,
+      desc = "Erhöht die Blockchance 10 Sek. lang um 30% und verursacht, solange aktiv, mit jedem geblockten Angriff 130 Heiligschaden. Durch 'Heiliger Schild' verursachter Schaden verursacht 20% zusätzliche Bedrohung. Jedes Blocken verbraucht eine Aufladung. 4 Aufladungen." },
+}) do
+    checkReading(case, "", track(case), nil)
+end
+
 if shown > 40 then print(string.format("... and %d more failures", shown - 40)) end
 print(string.format("%d English and %d German descriptions from %s", counts.en, counts.de, source))
 print(string.format("%d checks passed, %d failed (English %d, German %d)", passed, failed, failedByLang.en, failedByLang.de))

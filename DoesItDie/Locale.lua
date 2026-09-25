@@ -185,7 +185,8 @@ end
 --   "lässt es 9 Sek. lang bluten und fügt damit 15 Punkt(e) Schaden zu."  (Rend: words in between)
 --   "Überträgt alle 3 Sek. 15 Punkt(e) Gesundheit vom Ziel auf den Zaubernden. Hält 30 Sek. lang an."  (Siphon Life)
 -- Like the English reader, the last DoT clause wins, and per-second channels ("6 Sek. lang pro Sekunde 50 ...")
--- and minutes ("Hält 1 Min. lang an") aren't read.
+-- and minutes ("Hält 1 Min. lang an") aren't read. Neither is a buff or debuff whose duration comes before direct
+-- damage ("30 Sek. lang um 10% und fügt ihnen 103 Schaden zu"), which English words so that it isn't read either.
 function L.parseDot(desc, comboPoints)
     if L.isFinisher(desc) then return parseFinisher(plainNumbers(desc), comboPoints) end
     -- Rogue poisons: "Überzieht eine Waffe mit Gift", Retail "Überzieht Eure Waffen".
@@ -200,7 +201,13 @@ function L.parseDot(desc, comboPoints)
             -- The amount follows in the same clause.
             local clause = text:sub(after):match("^[^%.\n]*")
             local amount, amountSchool, at = firstDamage(clause)
-            if amount and not clause:sub(1, at - 1):find("Sekunde") and (not best or start > best) then
+            -- Words between the duration and the amount that make it the duration of something else: per second
+            -- (a channel), or a percentage (Thunder Clap: "erhöht die Zeit zwischen ihren Angriffen 30 Sek. lang um
+            -- 10% und fügt ihnen 103 Schaden zu"; Holy Shield: "Erhöht die Blockchance 10 Sek. lang um 30% und
+            -- verursacht ... 130 Heiligschaden").
+            local between = amount and clause:sub(1, at - 1)
+            if amount and not between:find("Sekunde") and not between:find("%%")
+                and (not best or start > best) then
                 best, total, school, duration = start, amount, amountSchool, tonumber(secs)
             end
         end
