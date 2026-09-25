@@ -6,6 +6,7 @@
 ## SavedVariables: DoesItDieDB
 ## X-Curse-Project-ID: 1709161
 
+Locale.lua
 DoesItDie.lua
 Options.lua
 Nameplates.lua
