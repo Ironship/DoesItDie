@@ -11,6 +11,9 @@ from lupa import LuaRuntime
 
 SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "DoesItDie", "DoesItDie.lua")
 src = open(SRC, encoding="utf-8").read()
+# Locale.lua loads first in the .toc and puts ns.locale on the namespace the chunks below use.
+LOCALE = open(os.path.join(os.path.dirname(SRC), "Locale.lua"), encoding="utf-8").read()
+LOCALE_PRELUDE = "local ns = {}\n(function(...)\n" + LOCALE + "\nend)(\"DoesItDie\", ns)\n"
 
 
 def chunk(start_marker, end_marker):
@@ -20,6 +23,7 @@ def chunk(start_marker, end_marker):
 
 
 lua_code = "\n".join([
+    LOCALE_PRELUDE,
     "local function isSecret(v) return false end",
     chunk("local DEFAULT_TICK_INTERVAL", "local TICK_MATCH_WINDOW"),
     chunk("-- Tick intervals that differ", "-- User options"),
