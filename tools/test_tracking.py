@@ -7,12 +7,17 @@ Covers cast outcomes (dodge/parry/miss vs. auto-attacks), recasts, first-tick wa
 Each scenario prints what the marker would count, and PASS/FAIL against the expectation.
 """
 import os
-from lupa import LuaRuntime
+import sys
 
-SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "DoesItDie", "DoesItDie.lua")
+from lupa.lua51 import LuaRuntime  # WoW runs Lua 5.1
+
+# An optional argument tests another copy of DoesItDie.lua (e.g. an older version, to see a test fail).
+SRC = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "DoesItDie", "DoesItDie.lua")
 src = open(SRC, encoding="utf-8").read()
 # Locale.lua loads first in the .toc and puts ns.locale on the namespace the chunks below use.
-LOCALE = open(os.path.join(os.path.dirname(SRC), "Locale.lua"), encoding="utf-8").read()
+LOCALE = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "DoesItDie", "Locale.lua"),
+              encoding="utf-8").read()
 LOCALE_PRELUDE = "local ns = {}\n(function(...)\n" + LOCALE + "\nend)(\"DoesItDie\", ns)\n"
 
 
@@ -24,7 +29,7 @@ def chunk(start_marker, end_marker):
 HARNESS = LOCALE_PRELUDE + """
 now = 100
 log = {}
-db = { ticks = {}, waitFirstTick = "off" }
+db = { ticks = {}, waitFirstTick = "off", estimateDuringCast = true }
 local dotsByTarget = {}
 local function isSecret(v) return false end
 local function trace(msg) table.insert(log, string.format("%.2f %s", now, msg)) end
@@ -41,16 +46,22 @@ local SPELLS = {
     [7] = { "Krallenhieb", "Attackiert das Ziel mit Krallen, fügt 19 Punkt(e) Schaden sowie 39 Punkt(e) zusätzlichen Schaden im Verlauf von 9 Sek. zu. Gewährt 1 Combopunkt." },
     [8] = { "Zerfetzen", "Finishing-Move, der Schaden im Lauf der Zeit verursacht. Der Schaden erhöht sich pro Combopunkt sowie durch Eure Angriffskraft:\\n   1 Punkt: 42 Schaden im Verlauf von 12 Sek.\\n   2 Punkte: 66 Schaden im Verlauf von 12 Sek.\\n   5 Punkte: 138 Schaden im Verlauf von 12 Sek." },
     [9] = { "Fluch der Pein", "Verflucht das Ziel mit Pein und fügt 24 Sek. lang 72 Punkt(e) Schattenschaden zu. Zuerst wird der Schaden langsam zugefügt und nimmt dann zu, bis der Fluch seine Gesamtdauer erreicht hat." },
-    [10] = { "Feuerregen", "Lässt einen feurigen Regen niedergehen, der 8 Sek. lang Feinde im Wirkungsbereich mit 168 Punkt(en) Feuerschaden verbrennt." },
+    -- Cast-time DoTs (Estimate during casting).
+    [11] = { "Immolate", "Burns the enemy for 11 Fire damage and then an additional 20 Fire damage over 15 sec." },
+    [12] = { "Feuerbrand", "Verbrennt den Gegner und fügt ihm 11 Feuerschaden sowie im Verlauf von 15 Sek. insgesamt 20 zusätzlichen Feuerschaden zu." },
+    [13] = { "Shadow Bolt", "Sends a shadowy bolt at the enemy, causing 13 Shadow damage." },
+    [10] = { "Feuerregen","Lässt einen feurigen Regen niedergehen, der 8 Sek. lang Feinde im Wirkungsbereich mit 168 Punkt(en) Feuerschaden verbrennt." },
 }
 local function spellNameAndDescription(id) return SPELLS[id][1], SPELLS[id][2] end
 """ + chunk("local UPDATE_INTERVAL", "-- User options") + chunk(
     "local function schoolFromWords", "---------------------------------------------------------------------------\n-- Display") + """
 local api = {}
-function api.reset(waitMode)
+function api.reset(waitMode, estimateDuringCast)
     for k in pairs(dotsByTarget) do dotsByTarget[k] = nil end
     for k in pairs(db.ticks) do db.ticks[k] = nil end
     db.waitFirstTick = waitMode or "off"
+    db.estimateDuringCast = estimateDuringCast ~= false
+    if dropCastInProgress then dropCastInProgress("reset") end
     forgetPendingOutcomes()
     resetComboCount()
     log = {}
@@ -58,11 +69,24 @@ end
 function api.learn(spellID, perTick) db.ticks[spellID] = perTick end
 function api.learned(spellID) return db.ticks[spellID] end
 function api.cast(spellID) onCastSent(spellID); return onPlayerCast(spellID) end
+-- A cast with a cast time, event by event as the addon's handler runs them. The handlers are looked up by name,
+-- so without the feature these do nothing (and the checks below fail instead of erroring).
+function api.start(spellID, guid) if onCastStart then onCastStart(guid, spellID) end end
+function api.succeed(spellID, guid)
+    if onCastSucceeded then onCastSucceeded(guid, spellID) end
+    onCastSent(spellID); return onPlayerCast(spellID)
+end
+function api.ended(event, spellID, guid) if onCastEnded then onCastEnded(event, guid, spellID) end end
+function api.targetChanged() if dropCastInProgress then dropCastInProgress("target changed") end end
 function api.hit(amount, school, flag) return onUnitCombat("target", "WOUND", flag or "", amount, school or 1) end
 function api.avoid(action) onUnitCombat("target", action, "", 0, 1) end
 function api.advance(seconds) now = now + seconds; housekeep(now) end
 function api.marker() local damage, count = targetRemainingDamage(); return damage .. " dmg from " .. count .. " DoT(s)" end
 function api.counted() return countedPoints end
+function api.provisional()
+    for _, entry in ipairs(dotBreakdown("mob")) do if entry.provisional then return true end end
+    return false
+end
 function api.log() return table.concat(log, "\\n") end
 return api
 """
@@ -220,6 +244,97 @@ sim.reset("unsure"); sim.cast(1)
 check("'When unsure', never seen tick: waits", sim.marker(), "0 dmg from 0 DoT(s)")
 sim.advance(3); sim.hit(10, 32)
 check("  first tick: shown with the real tick size", sim.marker(), "30 dmg from 1 DoT(s)")
+
+# Estimate during casting: Immolate (cast time; 20 Fire over 15s = 5 ticks of 4, learned) shows from the start
+# of its cast, and the cast's own result takes over.
+sim.reset(); sim.learn(11, 4); sim.start(11, "cast-1")
+check("Casting Immolate: shown while casting", sim.marker(), "20 dmg from 1 DoT(s)")
+check("  as a provisional entry", sim.provisional(), True)
+sim.advance(2.5)
+check("  still the full estimate late in the cast", sim.marker(), "20 dmg from 1 DoT(s)")
+sim.succeed(11, "cast-1")
+check("  cast lands: replaced, not added", sim.marker(), "20 dmg from 1 DoT(s)")
+check("  by the landed DoT (no provisional entry left)", sim.provisional(), False)
+sim.ended("UNIT_SPELLCAST_STOP", 11, "cast-1"); sim.advance(1.0)
+check("  STOP after the success doesn't remove it", sim.marker(), "20 dmg from 1 DoT(s)")
+sim.advance(2.0); sim.hit(4, 4)
+check("  first tick counts as usual", sim.marker(), "16 dmg from 1 DoT(s)")
+
+sim.reset(); sim.learn(11, 4); sim.start(11, "cast-1"); sim.advance(1.0)
+sim.ended("UNIT_SPELLCAST_STOP", 11, "cast-1"); sim.succeed(11, "cast-1")
+check("Casting Immolate, STOP just before SUCCEEDED: one DoT", sim.marker(), "20 dmg from 1 DoT(s)")
+sim.advance(1.0)
+check("  still there after the STOP grace", sim.marker(), "20 dmg from 1 DoT(s)")
+
+sim.reset(); sim.learn(11, 4); sim.start(11, "cast-1"); sim.advance(1.0)
+sim.ended("UNIT_SPELLCAST_INTERRUPTED", 11, "cast-1")
+check("Casting Immolate, interrupted: gone", sim.marker(), "0 dmg from 0 DoT(s)")
+sim.advance(3.0); sim.hit(4, 4)
+check("  and a Fire hit later doesn't bring it back", sim.marker(), "0 dmg from 0 DoT(s)")
+
+sim.reset(); sim.learn(11, 4); sim.start(11, "cast-1"); sim.advance(1.0)
+sim.ended("UNIT_SPELLCAST_FAILED", 11, "cast-1")
+check("Casting Immolate, failed: gone", sim.marker(), "0 dmg from 0 DoT(s)")
+
+sim.reset(); sim.learn(11, 4); sim.start(11, "cast-1"); sim.advance(0.5)
+sim.ended("UNIT_SPELLCAST_FAILED", 11, "cast-2")
+check("Casting Immolate, another press of it fails: still shown", sim.marker(), "20 dmg from 1 DoT(s)")
+sim.ended("UNIT_SPELLCAST_STOP", 11, "cast-1")
+check("  STOP without a success: kept briefly", sim.marker(), "20 dmg from 1 DoT(s)")
+sim.advance(0.6)
+check("  then gone", sim.marker(), "0 dmg from 0 DoT(s)")
+
+sim.reset(); sim.learn(11, 4); sim.start(11, "cast-1"); sim.advance(0.5); sim.targetChanged()
+check("Casting Immolate, target changed: gone", sim.marker(), "0 dmg from 0 DoT(s)")
+
+# Refreshing an Immolate that is ticking: the cast stands in for it, and an interrupted refresh leaves the old
+# one exactly as it was, including a tick that landed during the cast.
+sim.reset(); sim.learn(11, 4); sim.start(11, "cast-1"); sim.succeed(11, "cast-1")
+sim.advance(3.0); sim.hit(4, 4); sim.advance(1.0)
+check("Immolate ticking", sim.marker(), "16 dmg from 1 DoT(s)")
+sim.start(11, "cast-2")
+check("  refresh being cast: replaces it, not added", sim.marker(), "20 dmg from 1 DoT(s)")
+sim.advance(2.0); sim.hit(4, 4)
+check("  old one's tick during the cast", "TICK Immolate 4" in sim.log().split("\n")[-1], True)
+sim.ended("UNIT_SPELLCAST_INTERRUPTED", 11, "cast-2")
+check("  refresh interrupted: the old one is back, with its tick", sim.marker(), "12 dmg from 1 DoT(s)")
+sim.start(11, "cast-3"); sim.advance(1.5); sim.succeed(11, "cast-3")
+check("  refresh cast again and landed: one fresh DoT", sim.marker(), "20 dmg from 1 DoT(s)")
+
+sim.reset(); sim.learn(11, 4); sim.cast(1); sim.start(11, "cast-1")
+check("Corruption up, casting Immolate: both count", sim.marker(), "60 dmg from 2 DoT(s)")
+
+sim.reset(); sim.learn(12, 4); sim.start(12, "cast-1")
+check("German: casting Feuerbrand is shown", sim.marker(), "20 dmg from 1 DoT(s)")
+sim.reset(); sim.start(13, "cast-1")
+check("Casting Shadow Bolt (no DoT): nothing shown", sim.marker(), "0 dmg from 0 DoT(s)")
+sim.reset("always"); sim.learn(11, 4); sim.start(11, "cast-1")
+check("'Always' wait for first tick: not shown while casting either", sim.marker(), "0 dmg from 0 DoT(s)")
+
+
+# Option off: the same casts give exactly what they give without the cast events at all.
+def play(with_cast_events, estimate):
+    sim.reset("off", estimate); sim.learn(11, 4)
+    seen = []
+    for guid, interrupt in (("cast-1", False), ("cast-2", True), ("cast-3", False)):
+        if with_cast_events:
+            sim.start(11, guid)
+        seen.append(sim.marker())
+        sim.advance(1.5)
+        if with_cast_events and interrupt:
+            sim.ended("UNIT_SPELLCAST_INTERRUPTED", 11, guid)
+        elif with_cast_events:
+            sim.succeed(11, guid); sim.ended("UNIT_SPELLCAST_STOP", 11, guid)
+        elif not interrupt:
+            sim.cast(11)
+        seen.append(sim.marker())
+        sim.advance(1.5); sim.hit(4, 4)
+        seen.append(sim.marker())
+    return seen, [line.split(" ", 1)[1] for line in sim.log().split("\n") if line]
+
+
+check("Option off: casts with START/STOP events same as without", play(True, False), play(False, False))
+check("  (and on, they differ)", play(True, True) != play(False, True), True)
 
 print(f"\n{'all passed' if not failures else str(failures) + ' FAILED'}")
 if failures:
