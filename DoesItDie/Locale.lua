@@ -107,12 +107,24 @@ function L.comboPointsAwarded(desc)
     end
 end
 
--- Only on non-English clients: whether to log a description that wasn't read as a DoT (once per spell per
--- session), so a play session collects the client's real wording.
+-- Words nearly every English description has and other languages' descriptions don't ("sec" is left out: French
+-- writes it too).
+local ENGLISH_WORDS = { the = true, damage = true, ["and"] = true, ["for"] = true, over = true, of = true,
+    to = true, by = true, with = true, your = true, you = true }
+
+local function looksEnglish(desc)
+    for word in desc:gmatch("%a+") do
+        if ENGLISH_WORDS[word:lower()] then return true end
+    end
+    return false
+end
+
+-- Whether to log a description nothing read as a DoT (once per spell per session), so a play session collects
+-- the wording of a language that isn't read yet, or not fully. Decided by the text itself, not GetLocale():
+-- English descriptions that aren't DoTs (Fireball) aren't logged.
 local loggedUnread = {}
 function L.shouldLogUnread(spellID, desc)
-    local locale = GetLocale and GetLocale()
-    if not locale or locale == "enUS" or locale == "enGB" or type(desc) ~= "string" then return false end
+    if type(desc) ~= "string" or desc == "" or looksEnglish(desc) then return false end
     if loggedUnread[spellID] then return false end
     loggedUnread[spellID] = true
     return true

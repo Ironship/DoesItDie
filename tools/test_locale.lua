@@ -149,6 +149,22 @@ for _, case in ipairs({
     checkReading(case, "", track(case), nil)
 end
 
+-- Unread descriptions are logged by their text, not by GetLocale(): Forever answers enUS with German text.
+-- English ones never are (Fireball isn't a DoT and shouldn't fill the log), every German one is, once per spell.
+local logId = 0
+for _, locale in ipairs({ "enUS", "deDE" }) do
+    GetLocale = function() return locale end
+    for _, case in ipairs(cases) do
+        logId = logId + 1
+        check(case, "logged if unread (GetLocale " .. locale .. ")", ns.locale.shouldLogUnread(logId, case.desc),
+            case.lang ~= "en")
+        if case.lang ~= "en" then
+            check(case, "logged only once", ns.locale.shouldLogUnread(logId, case.desc), false)
+        end
+    end
+end
+GetLocale = nil
+
 -- The registry isn't bound to German: a second language registered after it is consulted too, for descriptions,
 -- finishers, combo points and names, and German still reads its own text.
 ns.locale.register({
@@ -176,6 +192,7 @@ do
     ns.locale.addNames(addon.nameTables)
     check(case, "Zwarm interval", addon.intervals["Zwarm"], 2)
     check(case, "Zinnschinden ignored", addon.ignored["Zinnschinden"], true)
+    check(case, "unread text logged", ns.locale.shouldLogUnread(-1, "Zorg ohne Zahlen"), true)
 end
 
 if shown > 40 then print(string.format("... and %d more failures", shown - 40)) end
