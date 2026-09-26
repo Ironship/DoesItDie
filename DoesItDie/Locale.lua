@@ -242,12 +242,15 @@ function L.parseDot(desc, comboPoints)
     end
 end
 
--- Only on non-English clients: whether to log a description that wasn't read as a DoT (once per spell per
--- session), so a play session collects the client's real wording.
+-- Only for non-English text: whether to log a description that wasn't read as a DoT (once per spell per
+-- session), so a play session collects the client's real wording. Forever's client answers GetLocale() with
+-- enUS while its text is German, so a German duration ("Sek", English writes "sec") counts too.
 local loggedUnread = {}
 function L.shouldLogUnread(spellID, desc)
+    if type(desc) ~= "string" then return false end
     local locale = GetLocale and GetLocale()
-    if not locale or locale == "enUS" or locale == "enGB" or type(desc) ~= "string" then return false end
+    local english = not locale or locale == "enUS" or locale == "enGB"
+    if english and not desc:find("Sek") then return false end
     if loggedUnread[spellID] then return false end
     loggedUnread[spellID] = true
     return true

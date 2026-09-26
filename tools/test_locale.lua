@@ -163,6 +163,20 @@ for _, case in ipairs({
     checkReading(case, "", track(case), want)
 end
 
+-- Forever's client answers GetLocale() with enUS while its spell text is German: unread German text is still
+-- logged (once), unread English text isn't.
+do
+    local realGetLocale = GetLocale
+    GetLocale = function() return "enUS" end
+    local case = { lang = "en", source = "forever-client", name = "Seal of Fury", id = 20163 }
+    check(case, "English unread not logged", ns.locale.shouldLogUnread(20163, "Fills the Paladin with divine fury for 30 sec, causing melee attacks to deal an additional 14 Holy damage. While a shield is equipped, each attack also grants an absorb shield equal to 50% of the Holy damage dealt.  Only one Seal can be active on the Paladin at any one time.\r\n\r\nUnleashing this Seal's energy causes 51 to 57 Holy damage to an enemy and taunts the target to attack you for 4 sec."), false)
+    case = { lang = "de", source = "forever-client", name = "Siegel des Furors", id = 20163 }
+    local german = "Erfüllt den Paladin 30 Sek. lang mit göttlichem Furor, wodurch jeder Nahkampfangriff zusätzlich 14 Heiligschaden verursacht. Während ein Schild ausgerüstet ist, gewährt jeder Angriff außerdem einen Absorptionsschild in Höhe von 50% des verursachten Heiligschadens. Es kann immer nur jeweils ein Siegel auf dem Paladin aktiv sein.\r\n\r\nDie Entfesselung der Energie dieses Siegels fügt einem Gegner 51 bis 57 Heiligschaden zu und verspottet das Ziel, damit es Euch 4 Sek. lang angreift."
+    check(case, "unread logged under enUS", ns.locale.shouldLogUnread(20163, german), true)
+    check(case, "unread logged once", ns.locale.shouldLogUnread(20163, german), false)
+    GetLocale = realGetLocale
+end
+
 if shown > 40 then print(string.format("... and %d more failures", shown - 40)) end
 print(string.format("%d English and %d German descriptions from %s", counts.en, counts.de, source))
 print(string.format("%d checks passed, %d failed (English %d, German %d)", passed, failed, failedByLang.en, failedByLang.de))
