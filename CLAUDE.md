@@ -94,8 +94,10 @@ Tuning constants (tick windows, tolerances, fallbacks) are at the top of `DoesIt
     `"Interface\\Buttons\\WHITE8X8"`. Edit Lua with file tools, and grep `Interface` after scripted edits.
   - Guard every value that might be secret with `isSecret()` before comparing or indexing with it.
   - Bump `DB_VERSION` when learned tick data from older versions would be wrong.
-  - Lua allows 200 locals per function scope, including a file's top level. `DoesItDie.lua` is around 170,
-    so new features with many top-level locals belong in a new file (added to the .toc) sharing `ns`.
+  - Lua allows 200 locals per function scope, including a file's top level. `DoesItDie.lua` had 193 at
+    v0.5.0-de8, room for 7, and `tools/test_load.py` fails with "main function has more than 200 local
+    variables" past the limit. New features with top-level locals belong in a new file (added to the .toc)
+    sharing `ns`.
 
 ## Status
 
