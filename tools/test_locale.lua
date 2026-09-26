@@ -133,15 +133,34 @@ else
     print("FAIL  no NAME_TABLES in " .. source)
 end
 
--- German buffs and debuffs whose duration stands before direct damage aren't DoTs (Classic Era deDE, Wowhead).
--- Their English text isn't read either.
+-- German buffs and debuffs whose duration stands before direct damage aren't DoTs (Classic Era deDE, Wowhead;
+-- Seal of Fury is Forever's own German text, build 1.60.1.70009). Their English text isn't read either.
 for _, case in ipairs({
+    { lang = "de", source = "forever-client", name = "Siegel des Furors", id = 20163,
+      desc = "Erfüllt den Paladin 30 Sek. lang mit göttlichem Furor, wodurch jeder Nahkampfangriff zusätzlich 14 Heiligschaden verursacht. Während ein Schild ausgerüstet ist, gewährt jeder Angriff außerdem einen Absorptionsschild in Höhe von 50% des verursachten Heiligschadens. Es kann immer nur jeweils ein Siegel auf dem Paladin aktiv sein.\r\n\r\nDie Entfesselung der Energie dieses Siegels fügt einem Gegner 51 bis 57 Heiligschaden zu und verspottet das Ziel, damit es Euch 4 Sek. lang angreift." },
     { lang = "de", source = "wowhead", name = "Donnerknall", id = 11581,
       desc = "Dröhnt in der Nähe befindliche Feinde mit Donner zu, erhöht die Zeit zwischen ihren Angriffen 30 Sek. lang um 10% und fügt ihnen 103 Schaden zu. Wirkt auf maximal 4 Ziele." },
     { lang = "de", source = "wowhead", name = "Heiliger Schild", id = 20928,
       desc = "Erhöht die Blockchance 10 Sek. lang um 30% und verursacht, solange aktiv, mit jedem geblockten Angriff 130 Heiligschaden. Durch 'Heiliger Schild' verursachter Schaden verursacht 20% zusätzliche Bedrohung. Jedes Blocken verbraucht eine Aufladung. 4 Aufladungen." },
 }) do
     checkReading(case, "", track(case), nil)
+end
+
+-- Forever's German client leaves Lacerate ranks 1-3 in English with the German unit ("Sek."). They read as the
+-- English client's text does.
+for _, case in ipairs({
+    { lang = "de", source = "forever-client", name = "Aufschlitzen", id = 24118,
+      desc = "Wounds the target causing them to bleed for 119 damage over 21 Sek..", english = 119 },
+    { lang = "de", source = "forever-client", name = "Aufschlitzen", id = 24119,
+      desc = "Wounds the target causing them to bleed for 196 damage over 21 Sek..", english = 196 },
+    { lang = "de", source = "forever-client", name = "Aufschlitzen", id = 24120,
+      desc = "Wounds the target causing them to bleed for 280 damage over 21 Sek..", english = 280 },
+}) do
+    local english = { name = "Lacerate",
+        desc = "Wounds the target causing them to bleed for " .. case.english .. " damage over 21 sec." }
+    local want = track(english)
+    check(case, "English total", want and want.total, case.english)
+    checkReading(case, "", track(case), want)
 end
 
 if shown > 40 then print(string.format("... and %d more failures", shown - 40)) end

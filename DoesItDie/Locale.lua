@@ -41,6 +41,9 @@ local DURATION_FIRST = {
 local DURATION_AFTER = {
     "()(%d+)([^%d%.\n]-)[Ss]chaden%s+im Verlauf von (%d+%.?%d*) Sek",
     "()(%d+)([^%d%.\n]-)[Ss]chaden%s+über (%d+%.?%d*) Sek",
+    -- Forever's German client leaves some texts English but with the German unit: "bleed for 119 damage over
+    -- 21 Sek.." (Lacerate ranks 1-3). The empty capture reads as physical.
+    "()(%d+)( ?)damage over (%d+%.?%d*) Sek",
 }
 
 -- Finisher lines between the amount and the seconds: "1 Punkt: 40 Schaden über 8 Sekunden." (Rupture),
@@ -204,9 +207,10 @@ function L.parseDot(desc, comboPoints)
             -- Words between the duration and the amount that make it the duration of something else: per second
             -- (a channel), or a percentage (Thunder Clap: "erhöht die Zeit zwischen ihren Angriffen 30 Sek. lang um
             -- 10% und fügt ihnen 103 Schaden zu"; Holy Shield: "Erhöht die Blockchance 10 Sek. lang um 30% und
-            -- verursacht ... 130 Heiligschaden").
+            -- verursacht ... 130 Heiligschaden"), or each attack (Forever's Seal of Fury: "30 Sek. lang mit
+            -- göttlichem Furor, wodurch jeder Nahkampfangriff zusätzlich 14 Heiligschaden verursacht").
             local between = amount and clause:sub(1, at - 1)
-            if amount and not between:find("Sekunde") and not between:find("%%")
+            if amount and not between:find("Sekunde") and not between:find("%%") and not between:find("[Jj]ede")
                 and (not best or start > best) then
                 best, total, school, duration = start, amount, amountSchool, tonumber(secs)
             end
