@@ -142,7 +142,7 @@ local VERDICT_STYLES = {
     dead = { icon = "Interface\\RaidFrame\\ReadyCheck-Ready",
         bg = { 0.10, 0.13, 0.10 }, edge = { 0.35, 0.50, 0.35 }, text = { 0.70, 0.85, 0.70 } },
 }
-local PREVIEW_MAX_HEALTH = 142 -- the mock boar's health, for the number on its bar
+local PREVIEW_MAX_HEALTH = 142 -- the mock murloc's health, for the number on its bar
 
 -- The kill icon picked in the settings, so the badge shows the same icon the portrait gets.
 local function chosenKillIcon()
@@ -718,7 +718,7 @@ local function buildPreview(pane)
     local portrait = mock:CreateTexture(nil, "BACKGROUND", nil, 1)
     portrait:SetSize(58, 58)
     portrait:SetPoint("TOPRIGHT", mock, "TOPRIGHT", -26, -19)
-    portrait:SetTexture("Interface\\Icons\\Ability_Hunter_Pet_Boar")
+    portrait:SetTexture("Interface\\Icons\\Achievement_Reputation_MurlocOracle")
     portrait:SetTexCoord(0.08, 0.92, 0.08, 0.92) -- the icon's own border would show at the circle's edge
     local mask = mock:CreateMaskTexture()
     mask:SetTexture("Interface\\CharacterFrame\\TempPortraitAlphaMask", "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
@@ -749,7 +749,7 @@ local function buildPreview(pane)
     name:SetSize(117, 12)
     name:SetPoint("TOPLEFT", mock, "TOPLEFT", 24, -26)
     name:SetJustifyH("LEFT")
-    name:SetText("Mottled Boar")
+    name:SetText("Murloc Raider")
 
     local levelCircle = mock:CreateTexture(nil, "OVERLAY")
     levelCircle:SetSize(39, 39)
@@ -764,8 +764,8 @@ local function buildPreview(pane)
         level:Hide()
     end
 
-    -- Health bar: 126 x 20 in the frame art's upper slot (the lower, power slot stays empty: a boar has no
-    -- mana). The marker is SetAllPoints'd onto this bar.
+    -- Health bar: 126 x 20 in the frame art's upper slot (the lower, power slot stays empty: a murloc raider
+    -- has no mana). The marker is SetAllPoints'd onto this bar.
     local healthBar = CreateFrame("StatusBar", nil, mock)
     healthBar:SetSize(126, 20)
     healthBar:SetPoint("TOPLEFT", mock, "TOPLEFT", 22, -39)
@@ -840,7 +840,7 @@ local function buildPreview(pane)
     plateName:SetPoint("BOTTOMLEFT", plateBar, "TOPLEFT", 0, 6) -- clear of the target border, which rises 5 above the bar
     plateName:SetPoint("RIGHT", plateLevel, "RIGHT")
     plateName:SetJustifyH("CENTER")
-    plateName:SetText("Mottled Boar")
+    plateName:SetText("Murloc Raider")
     plateName:SetTextColor(1, 0.13, 0.13) -- hostile
     window.mockPlate = mockPlate
     window.plateHealthBar = plateBar
