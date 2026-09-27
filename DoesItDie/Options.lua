@@ -131,17 +131,54 @@ local function syncDisplayHost()
     end
 end
 
+-- The verdict badge under the preview scene: one look per outcome.
+local VERDICT_STYLES = {
+    none = { icon = "Interface\\Common\\Indicator-Gray",
+        bg = { 0.11, 0.11, 0.12 }, edge = { 0.32, 0.32, 0.34 }, text = { 0.72, 0.72, 0.72 } },
+    survives = { icon = "Interface\\Common\\Indicator-Yellow",
+        bg = { 0.19, 0.14, 0.04 }, edge = { 0.85, 0.62, 0.12 }, text = { 1, 0.82, 0.35 } },
+    lethal = { icon = "Interface\\TargetingFrame\\UI-TargetingFrame-Skull", -- when the chosen kill icon has no path
+        bg = { 0.05, 0.19, 0.07 }, edge = { 0.30, 0.85, 0.35 }, text = { 0.55, 1, 0.55 } },
+    dead = { icon = "Interface\\RaidFrame\\ReadyCheck-Ready",
+        bg = { 0.10, 0.13, 0.10 }, edge = { 0.35, 0.50, 0.35 }, text = { 0.70, 0.85, 0.70 } },
+}
+local PREVIEW_MAX_HEALTH = 142 -- the mock boar's health, for the number on its bar
+
+-- The kill icon picked in the settings, so the badge shows the same icon the portrait gets.
+local function chosenKillIcon()
+    local entry = ns.findById and ns.lists and ns.findById(ns.lists.icons, db().skullIcon)
+    return entry and entry.path or VERDICT_STYLES.lethal.icon
+end
+
+local function setVerdict(kind, text, detail)
+    local style = VERDICT_STYLES[kind]
+    local badge = window.statusBadge
+    badge:SetBackdropColor(style.bg[1], style.bg[2], style.bg[3], 0.95)
+    badge:SetBackdropBorderColor(style.edge[1], style.edge[2], style.edge[3], 0.9)
+    badge.accent:SetColorTexture(style.edge[1], style.edge[2], style.edge[3], 1)
+    badge.icon:SetTexture(kind == "lethal" and chosenKillIcon() or style.icon)
+    window.status:SetText(text)
+    window.status:SetTextColor(style.text[1], style.text[2], style.text[3])
+    window.statusDetail:SetText(detail or "")
+end
+
 local function updatePreview()
     if not window then return end
     window.healthBar:SetValue(preview.health)
     window.plateHealthBar:SetValue(preview.health)
-    local total = previewTotal()
-    if total <= 0 then
-        window.status:SetText("No DoTs on the target")
-    elseif total >= preview.health then
-        window.status:SetText("|cff66ff66DoTs finish it: the kill icon shows|r")
+    local total, health = previewTotal(), preview.health
+    local function pct(value) return math.floor(value + 0.5) .. "%" end
+    -- The numbers the game's own target frame shows on its bar: percent left, health right.
+    window.healthPercent:SetText(pct(health))
+    window.healthValue:SetText(tostring(math.floor(PREVIEW_MAX_HEALTH * health / 100 + 0.5)))
+    if health <= 0 then
+        setVerdict("dead", "Target died", "")
+    elseif total <= 0 then
+        setVerdict("none", "No DoTs on the target", "")
+    elseif total >= health then
+        setVerdict("lethal", "DoTs kill it", pct(total) .. " vs " .. pct(health))
     else
-        window.status:SetText(string.format("Survives by %d%% of its health", math.floor(preview.health - total + 0.5)))
+        setVerdict("survives", "Survives by " .. pct(health - total), pct(total) .. " vs " .. pct(health))
     end
     ns.refresh()
 end
@@ -595,52 +632,257 @@ local function buildTabs()
 end
 
 local function buildPreview(pane)
+    -- y in px from the pane's top (pane: PREVIEW_WIDTH x ~486); every block on the same 12 px side margins.
+    local SIDE = 12
+    local CARD_WIDTH = PREVIEW_WIDTH - 2 * SIDE -- 266
+    local RULE = { 0.28, 0.28, 0.3 }
+
+    -- Forever ships its own bronze ("-c60") versions of the modern HUD art: those first, else the plain atlas
+    -- (Retail). false when neither exists, so the caller keeps a plain fallback.
+    local function setAtlas(texture, name)
+        if not (C_Texture and C_Texture.GetAtlasInfo) then return false end
+        for _, candidate in ipairs({ name .. "-c60", name }) do
+            if C_Texture.GetAtlasInfo(candidate) then
+                texture:SetAtlas(candidate)
+                return true
+            end
+        end
+        return false
+    end
+    local function fontOr(name, fallback) return _G[name] and name or fallback end
+    -- Vertical gradient (bottom colour, top colour); a flat colour where the client has no gradient API.
+    local function gradient(texture, bottom, top)
+        texture:SetTexture(WHITE)
+        if CreateColor and pcall(texture.SetGradient, texture, "VERTICAL",
+            CreateColor(bottom[1], bottom[2], bottom[3], bottom[4]), CreateColor(top[1], top[2], top[3], top[4])) then
+            return
+        end
+        texture:SetVertexColor(bottom[1], bottom[2], bottom[3], (bottom[4] + top[4]) / 2)
+    end
+    -- Section header: small gold caps and a hairline to the right margin.
+    local function header(text, anchor, gap)
+        local label = pane:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        label:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -gap)
+        label:SetText(text)
+        label:SetTextColor(0.85, 0.7, 0.3)
+        local rule = pane:CreateTexture(nil, "ARTWORK")
+        rule:SetColorTexture(RULE[1], RULE[2], RULE[3], 1)
+        rule:SetHeight(1)
+        rule:SetPoint("LEFT", label, "RIGHT", 8, 0)
+        rule:SetPoint("RIGHT", pane, "RIGHT", -SIDE, 0)
+        return label
+    end
+
+    -- Title row, level with the tab row on the right (its divider is also 34 px down).
     local title = pane:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    title:SetPoint("TOPLEFT", 12, -12)
+    title:SetPoint("TOPLEFT", SIDE, -12)
     title:SetText("Live preview")
+    local titleRule = pane:CreateTexture(nil, "ARTWORK")
+    titleRule:SetColorTexture(RULE[1], RULE[2], RULE[3], 1)
+    titleRule:SetHeight(1)
+    titleRule:SetPoint("TOPLEFT", 8, -34)
+    titleRule:SetPoint("TOPRIGHT", -8, -34)
 
-    -- Mock target frame: name, health bar, round portrait.
-    local mock = CreateFrame("Frame", nil, pane, "BackdropTemplate")
-    mock:SetSize(PREVIEW_WIDTH - 24, 78)
-    mock:SetPoint("TOP", pane, "TOP", 0, -40)
-    setBackdrop(mock, 0.03)
+    -- Scene (44..234): a patch of dusky world behind the mock frames, so they read as the game's own HUD.
+    local scene = CreateFrame("Frame", nil, pane, "BackdropTemplate")
+    scene:SetSize(CARD_WIDTH, 190)
+    scene:SetPoint("TOP", pane, "TOP", 0, -44)
+    scene:SetBackdrop({ edgeFile = WHITE, edgeSize = 1 })
+    scene:SetBackdropBorderColor(0, 0, 0, 1)
+    local ground = scene:CreateTexture(nil, "BACKGROUND", nil, -8)
+    ground:SetPoint("TOPLEFT", 1, -1)
+    ground:SetPoint("BOTTOMRIGHT", -1, 1)
+    ground:SetTexture("Interface\\FrameGeneral\\UI-Background-Rock")
+    ground:SetTexCoord(0, 0.26, 0, 0.18) -- about 1:1 texels on a 266 x 190 patch
+    ground:SetVertexColor(0.75, 0.8, 0.75)
+    local sky = scene:CreateTexture(nil, "BACKGROUND", nil, -7)
+    sky:SetAllPoints(ground)
+    gradient(sky, { 0.055, 0.08, 0.04, 0.25 }, { 0.07, 0.1, 0.15, 0.6 })
+    local topShade = scene:CreateTexture(nil, "BACKGROUND", nil, -6)
+    topShade:SetPoint("TOPLEFT", ground, "TOPLEFT")
+    topShade:SetPoint("TOPRIGHT", ground, "TOPRIGHT")
+    topShade:SetHeight(26)
+    gradient(topShade, { 0, 0, 0, 0 }, { 0, 0, 0, 0.6 })
+    local bottomShade = scene:CreateTexture(nil, "BACKGROUND", nil, -6)
+    bottomShade:SetPoint("BOTTOMLEFT", ground, "BOTTOMLEFT")
+    bottomShade:SetPoint("BOTTOMRIGHT", ground, "BOTTOMRIGHT")
+    bottomShade:SetHeight(30)
+    gradient(bottomShade, { 0, 0, 0, 0.65 }, { 0, 0, 0, 0 })
 
-    local portrait = mock:CreateTexture(nil, "ARTWORK")
-    portrait:SetSize(56, 56)
-    portrait:SetPoint("RIGHT", mock, "RIGHT", -12, 0)
+    -- Mock target frame: Forever's own target frame (TargetFrameTemplate, 232 x 100) rebuilt from its atlases at
+    -- Blizzard's offsets, so the marker and kill icon land where they will in combat.
+    local mock = CreateFrame("Frame", nil, scene)
+    mock:SetSize(232, 100)
+    mock:SetPoint("TOP", scene, "TOP", 0, -4)
+
+    local portrait = mock:CreateTexture(nil, "BACKGROUND", nil, 1)
+    portrait:SetSize(58, 58)
+    portrait:SetPoint("TOPRIGHT", mock, "TOPRIGHT", -26, -19)
     portrait:SetTexture("Interface\\Icons\\Ability_Hunter_Pet_Boar")
+    portrait:SetTexCoord(0.08, 0.92, 0.08, 0.92) -- the icon's own border would show at the circle's edge
     local mask = mock:CreateMaskTexture()
     mask:SetTexture("Interface\\CharacterFrame\\TempPortraitAlphaMask", "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
     mask:SetAllPoints(portrait)
     portrait:AddMaskTexture(mask)
 
-    local healthBar = CreateFrame("StatusBar", nil, mock)
-    healthBar:SetSize(PREVIEW_WIDTH - 110, 18)
-    healthBar:SetPoint("RIGHT", portrait, "LEFT", -10, -6)
-    healthBar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
-    healthBar:SetStatusBarColor(0.1, 0.8, 0.1)
-    healthBar:SetMinMaxValues(0, 100)
-    local healthBack = healthBar:CreateTexture(nil, "BACKGROUND")
-    healthBack:SetAllPoints()
-    healthBack:SetColorTexture(0.25, 0.08, 0.08, 1)
+    local frameArt = mock:CreateTexture(nil, "BACKGROUND", nil, 2)
+    frameArt:SetSize(192, 67)
+    frameArt:SetPoint("TOPLEFT", mock, "TOPLEFT", 20, -16)
+    local hasFrameArt = setAtlas(frameArt, "UI-HUD-UnitFrame-Target-PortraitOn")
+    if not hasFrameArt then
+        frameArt:ClearAllPoints()
+        frameArt:SetPoint("TOPLEFT", mock, "TOPLEFT", 18, -22)
+        frameArt:SetSize(134, 42)
+        frameArt:SetColorTexture(0, 0, 0, 0.55)
+    end
+
+    local nameBand = mock:CreateTexture(nil, "BORDER")
+    nameBand:SetSize(135, 18)
+    nameBand:SetPoint("TOPLEFT", mock, "TOPLEFT", 22, -25)
+    if setAtlas(nameBand, "UI-HUD-UnitFrame-Target-PortraitOn-Type") then
+        nameBand:SetVertexColor(1, 0, 0) -- hostile, as UnitSelectionColor colours it
+    else
+        nameBand:Hide()
+    end
 
     local name = mock:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    name:SetPoint("BOTTOMLEFT", healthBar, "TOPLEFT", 0, 4)
+    name:SetSize(117, 12)
+    name:SetPoint("TOPLEFT", mock, "TOPLEFT", 24, -26)
+    name:SetJustifyH("LEFT")
     name:SetText("Mottled Boar")
+
+    local levelCircle = mock:CreateTexture(nil, "OVERLAY")
+    levelCircle:SetSize(39, 39)
+    levelCircle:SetPoint("BOTTOMRIGHT", mock, "BOTTOMRIGHT", -13, 7)
+    local level = mock:CreateFontString(nil, "OVERLAY", fontOr("WhiteLargeNumberFont", "GameFontNormal"))
+    level:SetDrawLayer("OVERLAY", 2)
+    level:SetPoint("CENTER", levelCircle, "CENTER", 0, -0.5)
+    level:SetText("12")
+    level:SetTextColor(1, 0.82, 0) -- same-level ("fair") difficulty colour
+    if not setAtlas(levelCircle, "UI-HUD-UnitFrame-SmallCircle") then
+        levelCircle:Hide()
+        level:Hide()
+    end
+
+    -- Health bar: 126 x 20 in the frame art's upper slot (the lower, power slot stays empty: a boar has no
+    -- mana). The marker is SetAllPoints'd onto this bar.
+    local healthBar = CreateFrame("StatusBar", nil, mock)
+    healthBar:SetSize(126, 20)
+    healthBar:SetPoint("TOPLEFT", mock, "TOPLEFT", 22, -39)
+    healthBar:SetMinMaxValues(0, 100)
+    healthBar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
+    if setAtlas(healthBar:GetStatusBarTexture(), "UI-HUD-UnitFrame-Target-PortraitOn-Bar-Health") then
+        healthBar:SetStatusBarColor(1, 1, 1)
+    else
+        healthBar:SetStatusBarColor(0.1, 0.8, 0.1)
+    end
+    if not hasFrameArt then
+        local healthBack = healthBar:CreateTexture(nil, "BACKGROUND")
+        healthBack:SetAllPoints()
+        healthBack:SetColorTexture(0.25, 0.08, 0.08, 1)
+    end
+    -- The numbers the game's own frame prints on the bar: percent on the left, health on the right.
+    local barText = fontOr("TextStatusBarText", "GameFontHighlightSmall")
+    window.healthPercent = healthBar:CreateFontString(nil, "OVERLAY", barText)
+    window.healthPercent:SetPoint("LEFT", healthBar, "LEFT", 3, 0)
+    window.healthValue = healthBar:CreateFontString(nil, "OVERLAY", barText)
+    window.healthValue:SetPoint("RIGHT", healthBar, "RIGHT", -3, 0)
 
     window.healthBar = healthBar
     window.host = { healthBar = healthBar, portrait = portrait, layerFrame = window }
     window.mock = mock
 
-    -- Shown over the mock frame while combat has the display back on the real target.
-    window.combatNote = pane:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    window.combatNote:SetPoint("CENTER", mock, "CENTER")
-    window.combatNote:SetWidth(PREVIEW_WIDTH - 40)
+    -- Mock enemy nameplate: Forever's default ("Thin") plate, 190 wide: a 133 x 13 bar, the level badge right
+    -- of it, the name centred above. Drawn on by the real nameplate code (Nameplates.lua).
+    local mockPlate = CreateFrame("Frame", nil, scene)
+    mockPlate:SetSize(190, 36)
+    mockPlate:SetPoint("BOTTOM", scene, "BOTTOM", 0, 22)
+    local plateBar = CreateFrame("StatusBar", nil, mockPlate)
+    plateBar:SetSize(133, 13)
+    plateBar:SetPoint("BOTTOMLEFT", mockPlate, "BOTTOMLEFT", 12, 6)
+    plateBar:SetMinMaxValues(0, 100)
+    plateBar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
+    if setAtlas(plateBar:GetStatusBarTexture(), "UI-HUD-CoolDownManager-Bar") then
+        plateBar:SetStatusBarColor(1, 0, 0) -- hostile
+    else
+        plateBar:SetStatusBarColor(0.85, 0.1, 0.1)
+    end
+    local plateBack = mockPlate:CreateTexture(nil, "BACKGROUND")
+    plateBack:SetPoint("TOPLEFT", plateBar, "TOPLEFT", -2, 3)
+    plateBack:SetPoint("BOTTOMRIGHT", plateBar, "BOTTOMRIGHT", 6, -6)
+    if not setAtlas(plateBack, "UI-HUD-CoolDownManager-Bar-BG") then
+        plateBack:ClearAllPoints()
+        plateBack:SetAllPoints(plateBar)
+        plateBack:SetColorTexture(0.1, 0.02, 0.02, 1)
+    end
+    -- It is your target's plate: the target border (Forever: yellow art, vertex white).
+    local plateSelected = plateBar:CreateTexture(nil, "OVERLAY")
+    plateSelected:SetPoint("TOPLEFT", plateBack, "TOPLEFT", -3, 2)
+    plateSelected:SetPoint("BOTTOMRIGHT", plateBack, "BOTTOMRIGHT", 0, 2)
+    if setAtlas(plateSelected, "UI-HUD-CoolDownManager-Selected-yellow") then
+        plateSelected:SetVertexColor(1, 1, 1, 0.9)
+    else
+        plateSelected:Hide()
+    end
+    local plateLevel = mockPlate:CreateTexture(nil, "ARTWORK")
+    plateLevel:SetSize(28, 16)
+    plateLevel:SetPoint("LEFT", plateBar, "RIGHT", 5, 0)
+    local plateLevelText = mockPlate:CreateFontString(nil, "OVERLAY", fontOr("SystemFont_NamePlateLevel", "GameFontNormalSmall"))
+    plateLevelText:SetPoint("CENTER", plateLevel, "CENTER")
+    plateLevelText:SetText("12")
+    plateLevelText:SetTextColor(1, 0.82, 0)
+    if not setAtlas(plateLevel, "UI-HUD-Nameplates-LevelIndicator") then
+        plateLevel:Hide()
+        plateLevelText:Hide()
+    end
+    local plateName = mockPlate:CreateFontString(nil, "OVERLAY",
+        fontOr("SystemFont_NamePlate_Outlined", "GameFontHighlightSmallOutline"))
+    plateName:SetPoint("BOTTOMLEFT", plateBar, "TOPLEFT", 0, 6) -- clear of the target border, which rises 5 above the bar
+    plateName:SetPoint("RIGHT", plateLevel, "RIGHT")
+    plateName:SetJustifyH("CENTER")
+    plateName:SetText("Mottled Boar")
+    plateName:SetTextColor(1, 0.13, 0.13) -- hostile
+    window.mockPlate = mockPlate
+    window.plateHealthBar = plateBar
+    window.plateHost = { plate = mockPlate, healthBar = plateBar }
+
+    -- Shown over the mock frames while combat has the display back on the real target. On its own layer above
+    -- the scene: a font string on the pane would draw under it.
+    local noteLayer = CreateFrame("Frame", nil, scene)
+    noteLayer:SetAllPoints(scene)
+    noteLayer:SetFrameLevel(mock:GetFrameLevel() + 10)
+    window.combatNote = noteLayer:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    window.combatNote:SetPoint("CENTER", scene, "CENTER")
+    window.combatNote:SetWidth(CARD_WIDTH - 24)
     window.combatNote:SetText("In combat: the marker and kill icon are showing on your target. "
         .. "The preview resumes after combat.")
     window.combatNote:Hide()
 
-    -- Preview controls (plain numbers, not settings).
+    -- Verdict badge (242..272), right under the scene it describes: accent stripe, icon, verdict, numbers.
+    local badge = CreateFrame("Frame", nil, pane, "BackdropTemplate")
+    badge:SetSize(CARD_WIDTH, 30)
+    badge:SetPoint("TOP", scene, "BOTTOM", 0, -8)
+    badge:SetBackdrop({ bgFile = WHITE, edgeFile = WHITE, edgeSize = 1 })
+    badge.accent = badge:CreateTexture(nil, "ARTWORK")
+    badge.accent:SetPoint("TOPLEFT", 1, -1)
+    badge.accent:SetPoint("BOTTOMLEFT", 1, 1)
+    badge.accent:SetWidth(3)
+    badge.icon = badge:CreateTexture(nil, "ARTWORK")
+    badge.icon:SetSize(18, 18)
+    badge.icon:SetPoint("LEFT", badge, "LEFT", 12, 0)
+    window.statusDetail = badge:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    window.statusDetail:SetPoint("RIGHT", badge, "RIGHT", -10, 0)
+    window.statusDetail:SetJustifyH("RIGHT")
+    window.statusDetail:SetTextColor(0.75, 0.75, 0.75)
+    window.status = badge:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    window.status:SetPoint("LEFT", badge.icon, "RIGHT", 8, 0)
+    window.status:SetPoint("RIGHT", window.statusDetail, "LEFT", -8, 0)
+    window.status:SetJustifyH("LEFT")
+    window.status:SetWordWrap(false)
+    window.statusBadge = badge
+
+    -- Try it: the preview's own numbers (not settings).
+    local tryIt = header("TRY IT", badge, 16)
     local health = sliderRow(pane, "Target health", 0, 100, 1,
         function() return preview.health end,
         function(value)
@@ -648,7 +890,7 @@ local function buildPreview(pane)
             preview.health = value
             updatePreview()
         end, { layout = PREVIEW_LAYOUT, suffix = "%" })
-    health:SetPoint("TOPLEFT", mock, "BOTTOMLEFT", -4, -14)
+    health:SetPoint("TOPLEFT", tryIt, "BOTTOMLEFT", -6, -6) -- rows start 6 px in, so their labels sit on the margin
     local damage = sliderRow(pane, "DoT damage", 0, 100, 1,
         function() return math.floor(previewTotal() + 0.5) end,
         function(value)
@@ -659,46 +901,23 @@ local function buildPreview(pane)
             tooltip = "Remaining damage of two sample DoTs, in % of the target's max health." })
     damage:SetPoint("TOPLEFT", health, "BOTTOMLEFT", 0, 0)
 
-    window.simulateButton = pushButton(pane, "Simulate fight", 130, function()
+    window.simulateButton = pushButton(pane, "Simulate fight", 162, function()
         if simulation then stopSimulation() else startSimulation() end
     end)
     window.simulateButton:SetPoint("TOPLEFT", damage, "BOTTOMLEFT", 6, -10)
-    window.flashButton = pushButton(pane, "Flash", 80, function() ns.playFlash() end)
+    window.flashButton = pushButton(pane, "Flash", 96, function() ns.playFlash() end)
     window.flashButton:SetPoint("LEFT", window.simulateButton, "RIGHT", 8, 0)
 
-    window.status = pane:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    window.status:SetPoint("TOPLEFT", window.simulateButton, "BOTTOMLEFT", 0, -14)
-    window.status:SetWidth(PREVIEW_WIDTH - 30)
-    window.status:SetJustifyH("LEFT")
-
-    -- Mock enemy nameplate (red, like the real ones), drawn by the real nameplate code (Nameplates.lua).
-    local plateLabel = pane:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    plateLabel:SetPoint("TOPLEFT", window.status, "BOTTOMLEFT", 0, -20)
-    plateLabel:SetText("Nameplate")
-    local mockPlate = CreateFrame("Frame", nil, pane)
-    mockPlate:SetSize(140, 26)
-    mockPlate:SetPoint("TOPLEFT", plateLabel, "BOTTOMLEFT", 40, -6)
-    local plateName = mockPlate:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    plateName:SetPoint("TOP", mockPlate, "TOP")
-    plateName:SetText("Mottled Boar")
-    local plateBar = CreateFrame("StatusBar", nil, mockPlate)
-    plateBar:SetSize(140, 10)
-    plateBar:SetPoint("BOTTOM", mockPlate, "BOTTOM")
-    plateBar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
-    plateBar:SetStatusBarColor(0.85, 0.1, 0.1)
-    plateBar:SetMinMaxValues(0, 100)
-    local plateBack = plateBar:CreateTexture(nil, "BACKGROUND")
-    plateBack:SetAllPoints()
-    plateBack:SetColorTexture(0.1, 0.02, 0.02, 1)
-    window.mockPlate = mockPlate
-    window.plateHealthBar = plateBar
-    window.plateHost = { plate = mockPlate, healthBar = plateBar }
-
     local hint = pane:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    hint:SetPoint("BOTTOMLEFT", pane, "BOTTOMLEFT", 12, 12)
-    hint:SetWidth(PREVIEW_WIDTH - 24)
+    hint:SetPoint("BOTTOMLEFT", pane, "BOTTOMLEFT", SIDE, 12)
+    hint:SetWidth(CARD_WIDTH)
     hint:SetJustifyH("LEFT")
     hint:SetText("While this window is open, the marker and kill icon are drawn here instead of on your target.")
+    local hintRule = pane:CreateTexture(nil, "ARTWORK")
+    hintRule:SetColorTexture(RULE[1], RULE[2], RULE[3], 1)
+    hintRule:SetHeight(1)
+    hintRule:SetPoint("BOTTOMLEFT", hint, "TOPLEFT", 0, 8)
+    hintRule:SetPoint("RIGHT", pane, "RIGHT", -SIDE, 0)
 end
 
 local function createWindow()

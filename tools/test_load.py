@@ -293,11 +293,13 @@ check("  marker layered above the window's strata", G.DoesItDieRemaining.strata,
 
 
 def preview_plate_markers():
-    # The mock nameplate is the window's only frame whose child StatusBar is sized 140x10.
-    for f in G.frames.values():
-        if f.kind == "Frame" and f.width == 140 and f.height == 26:
-            return [c for c in f.children.values() if c.kind == "StatusBar" and c.width != 140]
-    return []
+    # The window keeps its mock nameplate and that plate's health bar; any other StatusBar on it is a marker.
+    win = G.DoesItDieOptions
+    plate, bar = win.mockPlate, win.plateHealthBar
+    if plate is None:
+        return []
+    same = lua.eval("function(a, b) return rawequal(a, b) end")  # two Python wrappers of one table are not ==
+    return [c for c in plate.children.values() if c.kind == "StatusBar" and not same(c, bar)]
 
 
 markers_on_preview_plate = preview_plate_markers()
