@@ -1,5 +1,9 @@
 # DoesItDie
 
+## Unreleased
+
+- **BetterBlizzFrames:** the marker now matches its bigger health bars, on the target and focus frames. Thanks to user_z6d65m38isuskaek for the report.
+
 ## v0.9.0
 
 **Restart the game fully after updating** (not just /reload): this version adds a new file.

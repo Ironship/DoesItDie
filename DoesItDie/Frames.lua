@@ -113,6 +113,15 @@ function ns.knownFocusFrame()
     end
 end
 
+-- BetterBlizzFrames' bigger health bars aren't Blizzard's bar resized: Blizzard's goes invisible (alpha 0, same
+-- size) and an unnamed bar of its own draws in its place. BBF.HealthBar gives that bar while it's active, else
+-- Blizzard's. Nil without BetterBlizzFrames.
+function ns.betterBlizzHealthBar(unitFrame)
+    if not unitFrame or type(BBF) ~= "table" or type(BBF.HealthBar) ~= "function" then return nil end
+    local ok, bar = pcall(BBF.HealthBar, unitFrame)
+    if ok and type(bar) == "table" then return bar end
+end
+
 -- Whether `region` and its ancestors below `root` are shown. The root itself is left out: a target frame hides
 -- while there's no target.
 local function shownBelow(region, root)

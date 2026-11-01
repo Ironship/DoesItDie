@@ -762,6 +762,34 @@ lua.execute("EllesmereUIUnitFrames_Target = nil")
 step("clear it, with EllesmereUI's target frame off", type_and_update(""))
 check("  back to Blizzard's", ns.attachStatus()[0], "Blizzard's target frame")
 
+# BetterBlizzFrames: bigger health bars are its own bar drawn over Blizzard's, which goes invisible at its old size.
+lua.execute("""
+    TargetFrame = CreateFrame("Frame", "TargetFrame", UIParent)
+    TargetFrame.TargetFrameContainer = CreateFrame("Frame", nil, TargetFrame)
+    TargetFrame.TargetFrameContainer.Portrait = TargetFrame.TargetFrameContainer:CreateTexture()
+    TargetFrame.TargetFrameContent = CreateFrame("Frame", nil, TargetFrame)
+    TargetFrame.TargetFrameContent.TargetFrameContentMain = CreateFrame("Frame", nil, TargetFrame.TargetFrameContent)
+    local main = TargetFrame.TargetFrameContent.TargetFrameContentMain
+    main.HealthBarsContainer = CreateFrame("Frame", nil, main)
+    TargetFrameHealthBar = CreateFrame("StatusBar", nil, main.HealthBarsContainer)
+    main.HealthBarsContainer.HealthBar = TargetFrameHealthBar
+    BBFMirrorBar = CreateFrame("StatusBar", nil, TargetFrame)
+    BBFMirrorOn = false
+    BBF = { HealthBar = function(frame)
+        if frame == TargetFrame then return BBFMirrorOn and BBFMirrorBar or TargetFrameHealthBar end
+    end }
+""")
+step("BetterBlizzFrames with normal bars", lambda: (H.fire("PLAYER_TARGET_CHANGED"), H.update(0.2)))
+check("  marker on Blizzard's bar", same(G.DoesItDieRemaining.allPoints, G.TargetFrameHealthBar), True)
+lua.execute("BBFMirrorOn = true")
+step("its bigger bars turned on (no target change)", lambda: H.update(1.2))
+check("  marker moves to its bar", same(G.DoesItDieRemaining.allPoints, G.BBFMirrorBar), True)
+lua.execute("BBF.HealthBar = function() error('broken') end")
+step("a BBF that throws", lambda: H.update(1.2))
+check("  falls back to Blizzard's bar", same(G.DoesItDieRemaining.allPoints, G.TargetFrameHealthBar), True)
+lua.execute("BBF, TargetFrame, TargetFrameHealthBar, BBFMirrorBar, BBFMirrorOn = nil, nil, nil, nil, nil")
+step("no BetterBlizzFrames, no target frame again", lambda: (H.fire("PLAYER_TARGET_CHANGED"), H.update(1.2)))
+
 
 # Learned tick sizes viewer (Advanced > View, /did ticks).
 def learn_some_ticks():
@@ -875,6 +903,17 @@ G.DoesItDieDB.focusMode = "off"
 step("focus back, Show on focus frame off", lambda: H.update(0.2))
 check("  hidden", focus_markers[0].shown if focus_markers else None, False)
 G.DoesItDieDB.focusMode = "markerIcon"
+lua.execute("""
+    BBFFocusBar = CreateFrame("StatusBar", nil, FocusFrame)
+    BBF = { HealthBar = function(frame) if frame == FocusFrame then return BBFFocusBar end end }
+""")
+step("BetterBlizzFrames' bigger focus bar", lambda: H.update(0.2))
+bbf_focus = markers_on(G.BBFFocusBar)
+check("  marker on its bar", len(bbf_focus), 1)
+check("    and shown", bbf_focus[0].shown if bbf_focus else None, True)
+lua.execute("BBF, BBFFocusBar = nil, nil")
+step("without it", lambda: H.update(0.2))
+check("  back on Blizzard's focus bar", focus_markers[0].shown if focus_markers else None, True)
 lua.execute("""
     local eui = CreateFrame("Frame", "EllesmereUIUnitFrames_Focus", UIParent)
     eui.Health = CreateFrame("StatusBar", nil, eui)

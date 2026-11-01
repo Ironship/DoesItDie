@@ -26,7 +26,8 @@ local function blizzardFocusBar()
     local ff = FocusFrame
     local content = ff and ff.TargetFrameContent
     local main = content and content.TargetFrameContentMain
-    return (main and main.HealthBarsContainer and main.HealthBarsContainer.HealthBar)
+    return ns.betterBlizzHealthBar(ff)
+        or (main and main.HealthBarsContainer and main.HealthBarsContainer.HealthBar)
         or (main and main.HealthBar)
         or FocusFrameHealthBar
         or (ff and ff.healthbar)

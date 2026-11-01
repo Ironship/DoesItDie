@@ -671,7 +671,8 @@ end
 local function findTargetHealthBar()
     local tf = TargetFrame
     local main = tf and tf.TargetFrameContent and tf.TargetFrameContent.TargetFrameContentMain
-    return (main and main.HealthBarsContainer and main.HealthBarsContainer.HealthBar)
+    return ns.betterBlizzHealthBar(tf)
+        or (main and main.HealthBarsContainer and main.HealthBarsContainer.HealthBar)
         or (main and main.HealthBar)
         or TargetFrameHealthBar
         or (tf and tf.healthbar)
@@ -788,6 +789,7 @@ local layerCheckedAt, lastStrata, lastLevel, layerErrorLogged = 0, nil, nil, fal
 local function updateLayering(now)
     if now - layerCheckedAt < LAYER_CHECK_INTERVAL then return end
     layerCheckedAt = now
+    attach() -- the bar can change without a target change (BetterBlizzFrames' settings; it also comes up late)
     local ok, strata, level
     if previewHost then
         -- One strata above the options window: it's a top-level frame, which WoW raises above everything else
