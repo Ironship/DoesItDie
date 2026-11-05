@@ -1082,6 +1082,58 @@ lua.execute("""
 """)
 
 
+# ElvUI parents unit frames under a shared hider and ElvUIParent, alongside the rest of the UI.
+# A layer scan must stay inside the target unit frame, even when no target/DoTs are active.
+lua.execute("""
+    layerVisits = 0
+    local function frame(kind, name, parent, level, unit)
+        local f = CreateFrame(kind, name, parent)
+        f:SetFrameStrata("MEDIUM")
+        f:SetFrameLevel(level)
+        function f:GetAttribute(key) if key == "unit" then return unit end end
+        function f:GetChildren()
+            layerVisits = layerVisits + 1
+            return unpack(self.children)
+        end
+        return f
+    end
+    local root = frame("Frame", "ElvUIParent", UIParent, 1)
+    local hider = frame("Frame", "ElvUF_UFParentFrameHider", root, 2)
+    local target = frame("Button", "ElvUF_Target", hider, 5, "target")
+    target.Health = frame("StatusBar", nil, target, 6)
+    target.Portrait = frame("Frame", nil, target, 40)
+    for i = 1, 1000 do
+        frame("Frame", nil, root, 500)
+    end
+    DoesItDieDB.customHealthBar = "ElvUF_Target.Health"
+    DoesItDieDB.customIconAnchor = ""
+    targetGuid = nil
+""")
+step("attach to a unit frame below a shared UI root", lambda: ns.display.attach(True))
+step("ten idle layer checks on a custom unit frame", lambda: [H.update(1.1) for _ in range(10)])
+check("  visits only target, health and portrait on each check", G.layerVisits, 30)
+check("  marker above target portrait, not unrelated UI", G.DoesItDieRemaining.level, 41)
+check("  picker still finds the top-level UI root", same(ns.frameRoot(G.ElvUF_Target.Health), G.ElvUIParent), True)
+check("  unit-less replacement keeps its previous root", same(ns.frameRoot(custom_bar, "target"), G.MyTargetFrame), True)
+lua.execute("""
+    local focus = CreateFrame("Button", "ElvUF_Focus", ElvUF_UFParentFrameHider)
+    function focus:GetAttribute(key) if key == "unit" then return "focus" end end
+    focus.Health = CreateFrame("StatusBar", nil, focus)
+    function ElvUF_Target.Health:GetAttribute() error("unreadable attribute") end
+""")
+check("  unreadable child attribute still reaches unit owner",
+      same(ns.frameRoot(G.ElvUF_Target.Health, "target"), G.ElvUF_Target), True)
+check("  focus stays inside its own unit frame",
+      same(ns.frameRoot(G.ElvUF_Focus.Health, "focus"), G.ElvUF_Focus), True)
+lua.execute("""
+    function issecretvalue(v) return v == SECRET end
+    function ElvUF_Target.Health:GetAttribute() return SECRET end
+""")
+check("  secret unit attribute is skipped",
+      same(ns.frameRoot(G.ElvUF_Target.Health, "target"), G.ElvUF_Target), True)
+lua.execute("issecretvalue = nil")
+
+
 def lua_quote(text):
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
 

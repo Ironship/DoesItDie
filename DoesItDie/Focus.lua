@@ -135,7 +135,7 @@ end
 local function updateLayering(bar, now)
     if bar ~= layerBar or now - layerCheckedAt >= LAYER_CHECK_INTERVAL then
         layerCheckedAt, layerBar = now, bar
-        local root = ns.frameRoot and ns.frameRoot(bar) or bar
+        local root = ns.frameRoot and ns.frameRoot(bar, "focus") or bar
         local ok, strata, level = pcall(topLayer, root)
         if ok and (strata ~= topStrata or level ~= topLevel) then
             topStrata, topLevel = strata, level

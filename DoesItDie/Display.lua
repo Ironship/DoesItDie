@@ -715,7 +715,7 @@ local function attach(force)
     skullAnchor = portrait or customBar or TargetFrame or UIParent
     local custom = customBar or customAnchor
     visibilityFrame = (not previewHost) and (custom or TargetFrame) or nil
-    layerRoot = custom and ns.frameRoot(custom) or TargetFrame
+    layerRoot = custom and ns.frameRoot(custom, "target") or TargetFrame
     plainSkullFrame:ClearAllPoints()
     plainSkullFrame:SetPoint("BOTTOM", skullWindow, "TOP", 0, 4)
 
