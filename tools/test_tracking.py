@@ -82,6 +82,8 @@ local api = {}
 function api.reset(waitMode, estimateDuringCast)
     for k in pairs(dotsByTarget) do dotsByTarget[k] = nil end
     for k in pairs(db.ticks) do db.ticks[k] = nil end
+    if combatTally then for k in pairs(combatTally) do combatTally[k] = nil end end
+    db.tickWeights = nil
     db.waitFirstTick = waitMode or "off"
     lastBuilder, lastDotCast, lastOutcome, armedTrap = nil, nil, nil, nil
     for k in pairs(sentTargets) do sentTargets[k] = nil end
@@ -121,6 +123,15 @@ function api.hit(amount, school, flag, unit) return onUnitCombat(unit or "target
 function api.avoid(action, school, unit) onUnitCombat(unit or "target", action, "", 0, school or 1) end
 -- A hit whose amount the client hides (issue #26).
 function api.hiddenHit(school, unit) return onUnitCombat(unit or "target", "WOUND", "", SECRET, school or 1) end
+-- The damage meter after combat (local addition): pairs of spellID, total; "secret" for a hidden total.
+function api.meter(...)
+    local args, spells = {...}, {}
+    for i = 1, #args, 2 do
+        spells[#spells + 1] = { spellID = args[i], totalAmount = args[i + 1] == "secret" and SECRET or args[i + 1] }
+    end
+    return learnFromMeter(spells)
+end
+function api.weight(key) return db.tickWeights and db.tickWeights[key] end
 function api.advance(seconds) now = now + seconds; housekeep(now) end
 function api.marker() local damage, count = targetRemainingDamage(); return damage .. " dmg from " .. count .. " DoT(s)" end
 function api.markerOn(key) local total = 0; for _, e in ipairs(dotBreakdown(key)) do total = total + e.damage end; return math.floor(total + 0.5) .. " dmg" end
@@ -649,6 +660,44 @@ sim.reset(); sim.learn(16, 12); sim.cast(16); sim.advance(3); sim.hit(12, 32); s
 check("Readable tick then a hidden one: learned size kept, both count", (sim.learned(16), ticks("Shadow Word")),
       (12, 2))
 check("  estimate uses the learned size", sim.marker(), "24 dmg from 1 DoT(s)")
+
+
+# Local addition: real tick sizes from the damage meter after combat, while hit amounts are hidden in combat.
+def hidden_ticks(n, every, school):
+    for _ in range(n):
+        sim.advance(every); sim.hiddenHit(school)
+
+sim.reset(); sim.cast(16); hidden_ticks(4, 3, 32)
+check("Meter: SW:Pain 4 hidden ticks, meter total 48: learns 12", (sim.meter(16, 48), sim.learned(16)), (1, 12))
+check("  logged", "LEARN Shadow Word: Pain: meter 48 over 4 tick(s)" in sim.log(), True)
+check("  next cast estimates from it", (sim.cast(16), sim.marker())[1], "48 dmg from 1 DoT(s)")
+
+sim.reset(); sim.cast(6); hidden_ticks(12, 2, 32)
+check("Meter: Agony 12 ticks (shape 0.5/1/1.5), total 65: average tick 5.4", (sim.meter(6, 65), sim.learned(6)), (1, 5.4))
+sim.reset(); sim.cast(6); hidden_ticks(10, 2, 32)
+check("Meter: Agony mob dies after 10 ticks (factors 9), total 54: 6", (sim.meter(6, 54), sim.learned(6)), (1, 6))
+
+sim.reset(); sim.cast(8); hidden_ticks(5, 3, 4)
+check("Meter: Immolate 11 upfront + 20 over 5 ticks, total 37: tick 4.8", (sim.meter(8, 37), sim.learned(8)), (1, 4.8))
+
+sim.reset(); sim.cast(16); hidden_ticks(4, 3, 32)
+check("Meter: total 10x the description: not learned", (sim.meter(16, 400), sim.learned(16)), (0, None))
+sim.reset(); sim.cast(16); hidden_ticks(1, 3, 32)
+check("Meter: only one tick counted: not learned", (sim.meter(16, 12), sim.learned(16)), (0, None))
+sim.reset(); sim.cast(16); hidden_ticks(4, 3, 32)
+check("Meter: secret total: not learned", (sim.meter(16, "secret"), sim.learned(16)), (0, None))
+sim.reset(); sim.cast(16); hidden_ticks(4, 3, 32)
+check("Meter: spell missing from the meter: not learned", (sim.meter(999, 50), sim.learned(16)), (0, None))
+check("  and the tally starts over", (sim.meter(16, 48), sim.learned(16)), (0, None))
+
+sim.reset(); sim.cast(16); hidden_ticks(4, 3, 32); sim.meter(16, 48)
+sim.cast(16); hidden_ticks(4, 3, 32)
+check("Meter: second fight 14/tick blends with 12 (4 ticks each): 13", (sim.meter(16, 56), sim.learned(16), sim.weight(16)), (1, 13, 8))
+
+sim.reset(); sim.cast(16)
+for _ in range(4):
+    sim.advance(3); sim.hit(10, 32)
+check("Meter: readable ticks learn as before, meter doesn't override", (sim.meter(16, 80), sim.learned(16)), (0, 10))
 
 print(f"\n{'all passed' if not failures else str(failures) + ' FAILED'}")
 if failures:
