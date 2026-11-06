@@ -1,7 +1,10 @@
 # DoesItDie
 
-## Unreleased
+## v0.9.1
 
+- **DoTs no longer vanish a few seconds after casting.** Forever now hides the damage numbers of hits during combat, so no tick was ever recognized and every DoT was dropped as resisted. Ticks are now recognized by their timing and school, and the marker counts down for the DoT's whole duration. Thanks to quintanilha6 for the fix and jasondotsetHacked for finding the cause (issue #26).
+- **Estimates include your spell power and attack power again:** after each fight, the real size of your DoTs' ticks is learned from Blizzard's damage meter, so the next casts start from it. Thanks to w4sspr.
+- **ElvUI:** no more stuttering with a custom ElvUI target or focus frame set under Advanced. Thanks to timoschuetzle.
 - **BetterBlizzFrames:** the marker now matches its bigger health bars, on the target and focus frames. Thanks to user_z6d65m38isuskaek for the report.
 
 ## v0.9.0
