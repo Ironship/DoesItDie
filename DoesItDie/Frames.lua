@@ -19,10 +19,10 @@ local function isSecret(v)
 end
 
 -- A plain value from region:method(), or nil if it errors or is secret.
-local function plain(region, method)
+local function plain(region, method, ...)
     local fn = region[method]
     if type(fn) ~= "function" then return nil end
-    local ok, value = pcall(fn, region)
+    local ok, value = pcall(fn, region, ...)
     if not ok or isSecret(value) then return nil end
     return value
 end
@@ -78,10 +78,13 @@ function ns.framePath(region)
     end
 end
 
--- The top-level frame `region` belongs to (its ancestor just below UIParent), for layering.
-function ns.frameRoot(region)
+-- For layering, stop at the owning unit button when a unit is supplied. Frameworks such as ElvUI parent
+-- all unit frames under shared hiders/UI roots: scanning that whole tree every second visits unrelated
+-- frames and lets their strata/levels affect our marker. Without a unit, keep the top-level root for Pick.
+function ns.frameRoot(region, unit)
     local current = region
     for _ = 1, 20 do
+        if unit and plain(current, "GetAttribute", "unit") == unit then return current end
         local parent = plain(current, "GetParent")
         if not parent or parent == UIParent then return current end
         current = parent
