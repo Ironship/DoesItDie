@@ -25,6 +25,7 @@ be displayed but not compared or used in math. Verified in-game on the 1.60.1 be
 | Auras on the target (reading them errors) | `UNIT_COMBAT` damage amounts, school, crit flag, dodge/miss/etc. |
 | Combo points | Enemy GUIDs |
 | Some Blizzard frames' strata/level | Your stats **out** of combat |
+| `UNIT_COMBAT` damage **amounts** in combat (since 2026-11, issue #26) | `UNIT_COMBAT` action and school |
 
 Registering `COMBAT_LOG_EVENT_UNFILTERED` is forbidden: it raises a "blocked action" popup even under `pcall`.
 
@@ -105,6 +106,9 @@ Consequences for the design:
    out attack/spell power). A DoT that never ticks is dropped after two missed ticks, but only ticks that could have been
    seen count: `UNIT_COMBAT` only covers the target, focus and visible nameplates, so a mob you tabbed away from
    keeps its DoTs until they expire.
+   **Hidden amounts** (issue #26): when a hit's amount is secret but its school isn't, it's matched on school and
+   timing alone (`onHiddenAmountHit`): it counts as a tick and keeps the rhythm, but teaches no size, so the
+   estimate stays on the learned or description tick. A resisted DoT still gets no ticks and is dropped.
 5. **Mob keys:** DoTs are kept per mob by GUID. In instances creature GUIDs are reportedly secret (PR #8), so a
    mob with a nameplate is keyed `plate:nameplateN` instead (`plateTokenFor`: the token stays the mob's while its
    plate is up; `NAME_PLATE_UNIT_ADDED/REMOVED` drop that key's DoTs before the token goes to another mob). With

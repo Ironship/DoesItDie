@@ -36,7 +36,9 @@ now = 100
 log = {}
 db = { ticks = {}, waitFirstTick = "off", estimateDuringCast = true }
 local dotsByTarget = {}
-local function isSecret(v) return false end
+-- A stand-in for the client's secret values (issue #26: hit amounts in combat).
+SECRET = setmetatable({}, { __tostring = function() return "<secret>" end })
+local function isSecret(v) return v == SECRET end
 local function trace(msg) table.insert(log, string.format("%.2f %s", now, msg)) end
 function GetTime() return now end
 -- The target and the mobs behind visible nameplates (unit -> mob key).
@@ -117,6 +119,8 @@ function api.plate(unit, key) plates[unit] = key end
 -- Hits and avoids on the target, or on another unit (e.g. a nameplate).
 function api.hit(amount, school, flag, unit) return onUnitCombat(unit or "target", "WOUND", flag or "", amount, school or 1) end
 function api.avoid(action, school, unit) onUnitCombat(unit or "target", action, "", 0, school or 1) end
+-- A hit whose amount the client hides (issue #26).
+function api.hiddenHit(school, unit) return onUnitCombat(unit or "target", "WOUND", "", SECRET, school or 1) end
 function api.advance(seconds) now = now + seconds; housekeep(now) end
 function api.marker() local damage, count = targetRemainingDamage(); return damage .. " dmg from " .. count .. " DoT(s)" end
 function api.markerOn(key) local total = 0; for _, e in ipairs(dotBreakdown(key)) do total = total + e.damage end; return math.floor(total + 0.5) .. " dmg" end
@@ -604,6 +608,47 @@ check("Enemy target A, DoT cast at soft enemy B (mouseover): on B", (sim.markerO
 sim.reset(); sim.target("A"); sim.canAttack("target", True); sim.plate("softenemy", "B")
 sim.succeed(1, sim.send(1, None, "A"))
 check("  cast at A itself: on A", (sim.markerOn("A"), sim.markerOn("B")), ("40 dmg", "0 dmg"))
+
+# Issue #26: Forever hides UNIT_COMBAT amounts in combat, while action and school stay readable. Hits are then
+# matched to DoTs on school and timing alone, and teach no tick size.
+sim.reset(); sim.cast(16)
+check("Hidden amounts: SW:Pain (description 10/tick) shown on cast", sim.marker(), "40 dmg from 1 DoT(s)")
+sim.advance(3); sim.hiddenHit(32)
+check("  hidden hit on its rhythm: counted as a tick", sim.marker(), "30 dmg from 1 DoT(s)")
+check("  logged as a hidden tick", "TICK Shadow Word: Pain (amount hidden)" in sim.log(), True)
+for _ in range(2):
+    sim.advance(3); sim.hiddenHit(32)
+check("  three ticks later: still there, one tick left", sim.marker(), "10 dmg from 1 DoT(s)")
+check("  never dropped as 'never ticked'", "DROP" in sim.log(), False)
+check("  no size learned from hidden hits", sim.learned(16), None)
+
+sim.reset(); sim.cast(16)
+sim.advance(3); sim.advance(3.5)
+check("Hidden amounts, no hits at all (resisted): still dropped", sim.marker(), "0 dmg from 0 DoT(s)")
+
+sim.reset(); sim.cast(16)
+sim.advance(1.5); sim.hiddenHit(32); sim.advance(3); sim.hiddenHit(32); sim.advance(2)
+check("Hidden hits off the DoT's rhythm: not ticks, dropped", sim.marker(), "0 dmg from 0 DoT(s)")
+
+sim.reset(); sim.cast(16)
+sim.advance(3); sim.hiddenHit(1); sim.advance(3.5)
+check("Hidden Physical hit at a Shadow DoT's tick time: not its tick", sim.marker(), "0 dmg from 0 DoT(s)")
+
+sim.reset(); sim.learn(1, 10); sim.cast(1); sim.advance(1); sim.cast(16)
+sim.advance(2); sim.hiddenHit(32); sim.advance(1); sim.hiddenHit(32)
+check("Hidden: Corruption and SW:Pain a second apart each take their own tick",
+      (ticks("Corruption"), ticks("Shadow Word: Pain")), (1, 1))
+
+sim.reset(); sim.learn(1, 10); sim.plate("nameplate1", "mob"); sim.cast(1); sim.cast(16)
+sim.advance(3)
+sim.hiddenHit(32); sim.hiddenHit(32, "nameplate1"); sim.hiddenHit(32); sim.hiddenHit(32, "nameplate1")
+check("Hidden: two Shadow DoTs ticking at once, each hit also on the plate: one tick each",
+      (ticks("Corruption"), ticks("Shadow Word: Pain")), (1, 1))
+
+sim.reset(); sim.learn(16, 12); sim.cast(16); sim.advance(3); sim.hit(12, 32); sim.advance(3); sim.hiddenHit(32)
+check("Readable tick then a hidden one: learned size kept, both count", (sim.learned(16), ticks("Shadow Word")),
+      (12, 2))
+check("  estimate uses the learned size", sim.marker(), "24 dmg from 1 DoT(s)")
 
 print(f"\n{'all passed' if not failures else str(failures) + ' FAILED'}")
 if failures:

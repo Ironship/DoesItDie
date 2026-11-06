@@ -950,6 +950,62 @@ end
 -- from the same token feeds another DoT, one from another token is a copy and is dropped (PR #14).
 local combatFrameAt
 local combatFrameHits = {}
+
+-- Within one instant, the record for a hit's signature: a repeat from the same token feeds another DoT, one from
+-- another token is a copy (returns nil). See combatFrameHits above.
+local function hitRecord(signature, unit, now)
+    if combatFrameAt ~= now then
+        combatFrameHits = {}
+        combatFrameAt = now
+    end
+    local hit = combatFrameHits[signature]
+    if hit then
+        if hit.unit ~= unit then return nil end
+    else
+        hit = { unit = unit, fed = {} }
+        combatFrameHits[signature] = hit
+    end
+    return hit
+end
+
+-- Forever hides UNIT_COMBAT damage amounts in combat (secret; issue #26), while the action and school stay
+-- readable. Without a size, a hit is matched on school and timing alone: one in a DoT's school, on its rhythm,
+-- in a slot not yet taken, is its tick. That keeps the DoT (a resisted one still gets no ticks and is dropped)
+-- and anchors its rhythm, but teaches no size: the estimate keeps the learned or description tick. Physical
+-- bleeds can take a white hit landing in the window for a tick; that only keeps the DoT on its schedule.
+local function onHiddenAmountHit(key, unit, school)
+    local dots = dotsByTarget[key]
+    if not dots then return end
+    local now = GetTime()
+    local hit = hitRecord(key .. ":hidden:" .. school, unit, now)
+    if not hit then return end
+    local best, bestName, bestDistance, bestIndex
+    for name, dot in pairs(dots) do
+        if not hit.fed[name] and dot.school == school then
+            local distance, index = distanceToExpectedTick(dot, now)
+            local window = dot.firstTickAt and TICK_MATCH_WINDOW_ANCHORED or TICK_MATCH_WINDOW
+            local freshSlot = not dot.firstTickAt or index > dot.lastTickIndex
+            if freshSlot and distance <= window and (not bestDistance or distance < bestDistance) then
+                best, bestName, bestDistance, bestIndex = dot, name, distance, index
+            end
+        end
+    end
+    if not best then
+        trace(string.format("HIT (amount hidden) school %d on %s not matched to a DoT", school, unit))
+        return
+    end
+    local wasWaiting = isWaiting(best)
+    best.ticksSeen = best.ticksSeen + 1
+    best.lastTickAmount, best.lastTickShape, best.lastTickCrit = 0, tickShape(best, tickNumberAt(best, now)), false
+    best.offBeatCandidate = nil
+    local tickIndex = anchorTick(best, bestIndex, now)
+    hit.fed[bestName] = true
+    trace(string.format("TICK %s (amount hidden) on %s (tick %d/%d, expecting %.1f for this tick)%s", bestName,
+        unit, tickIndex, best.totalTicks, expectedTick(best) * best.lastTickShape,
+        wasWaiting and ", now shown" or ""))
+    if wasWaiting then return key end
+end
+
 local function onUnitCombat(unit, action, flag, amount, school)
     if isSecret(action) then return end
     -- A fully absorbed tick still landed (a shield ate it): it proves the DoT is on and keeps its rhythm, so ABSORB
@@ -960,6 +1016,9 @@ local function onUnitCombat(unit, action, flag, amount, school)
     if not key then return end
     if AVOIDED_ACTIONS[action] then return onAvoided(key, action, school) end
     if action == "WOUND" or absorbed then onHit(key, school) end
+    if isSecret(amount) and not isSecret(school) and type(school) == "number" then
+        return onHiddenAmountHit(key, unit, school)
+    end
     if isSecret(amount) or isSecret(school) or type(amount) ~= "number" then return end
     local isCrit = not isSecret(flag) and flag == "CRITICAL"
     if not dotsByTarget[key] and not armedTrap then return end
@@ -967,18 +1026,8 @@ local function onUnitCombat(unit, action, flag, amount, school)
 
     -- The same hit fires for target, nameplateN, softenemy...: handle it once (see combatFrameHits above).
     local now = GetTime()
-    if combatFrameAt ~= now then
-        combatFrameHits = {}
-        combatFrameAt = now
-    end
-    local signature = key .. ":" .. amount .. ":" .. school
-    local hit = combatFrameHits[signature]
-    if hit then
-        if hit.unit ~= unit then return end
-    else
-        hit = { unit = unit, fed = {} }
-        combatFrameHits[signature] = hit
-    end
+    local hit = hitRecord(key .. ":" .. amount .. ":" .. school, unit, now)
+    if not hit then return end
     local lastCombatFed = hit.fed
 
     local best, bestName, bestDistance, bestIndex
