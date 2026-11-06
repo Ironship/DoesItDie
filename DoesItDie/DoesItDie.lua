@@ -324,6 +324,15 @@ local function parseDot(desc, comboPoints)
     return ns.locale.parseDot(desc, comboPoints or 5)
 end
 
+-- The upfront hit of a spell that also leaves a DoT (Immolate's "11 Fire damage and then an additional ..."),
+-- averaged for a range ("8 to 9 Arcane damage and then"). English descriptions only; 0 when there is none.
+local function parseDirectPart(desc)
+    if type(desc) ~= "string" or isSecret(desc) then return 0 end
+    local lo, hi = desc:match("(%d+) to (%d+)%s*[%a ]-damage and then")
+    if lo then return (tonumber(lo) + tonumber(hi)) / 2 end
+    return tonumber(desc:match("(%d+)%s*[%a ]-damage and then")) or 0
+end
+
 ---------------------------------------------------------------------------
 -- DoT tracking
 ---------------------------------------------------------------------------
@@ -355,6 +364,37 @@ local function isWaiting(dot)
     if dot.ticksSeen > 0 then return false end
     if dot.doubtful or db.waitFirstTick == "always" then return true end
     return db.waitFirstTick == "unsure" and dot.unsure
+end
+
+-- Real tick sizes from Blizzard's damage meter. Forever hides UNIT_COMBAT amounts in combat (issue #26), so ticks
+-- are matched on school and timing and teach no size. After combat the damage meter's per-spell totals are
+-- readable, so each DoT's total over the ticks counted this combat is its real average tick (Agony's ticks are
+-- weighted by their shape factors). A spell's upfront hit (Immolate) is in the same total: it's split off in the
+-- description's proportion. combatTally: learned-size key -> what this combat counted.
+local combatTally = {}
+
+local function tallyFor(dot)
+    if not dot.tickKey then return nil end
+    local t = combatTally[dot.tickKey]
+    if not t then
+        t = { spellID = dot.spellID, name = dot.name, factors = 0, ticks = 0, direct = 0,
+            descTick = dot.total / dot.totalTicks }
+        combatTally[dot.tickKey] = t
+    end
+    return t
+end
+
+local function tallyCast(dot, direct)
+    local t = tallyFor(dot)
+    if t then t.direct = t.direct + (direct or 0) end
+end
+
+local function tallyHiddenTick(dot, factor)
+    local t = tallyFor(dot)
+    if t then
+        t.factors = t.factors + factor
+        t.ticks = t.ticks + 1
+    end
 end
 
 -- Combo points, for finishers. By UNIT_SPELLCAST_SUCCEEDED they're already spent, so they're read when the
@@ -704,6 +744,8 @@ local function onPlayerCast(spellID, castGUID)
     local dot = newDot(spellID, tickKey, name, total, school, duration, statedInterval, now)
     dotsByTarget[key][name] = dot
     lastDotCast = { key = key, name = name, dot = dot, previous = previous, at = now }
+    dot.name = dot.name or name
+    tallyCast(dot, parseDirectPart(desc))
     local learned = tickKey and db.ticks[tickKey]
     -- The starting estimate is shaky without a learned tick size (description numbers leave out spell power
     -- and attack power) or, for finishers, without knowing the combo points.
@@ -1000,11 +1042,60 @@ local function onHiddenAmountHit(key, unit, school)
     best.offBeatCandidate = nil
     local tickIndex = anchorTick(best, bestIndex, now)
     hit.fed[bestName] = true
+    tallyHiddenTick(best, best.lastTickShape)
     trace(string.format("TICK %s (amount hidden) on %s (tick %d/%d, expecting %.1f for this tick)%s", bestName,
         unit, tickIndex, best.totalTicks, expectedTick(best) * best.lastTickShape,
         wasWaiting and ", now shown" or ""))
     if wasWaiting then return key end
 end
+
+local LEARN_MIN_FACTORS = 2              -- at least two (average) ticks' worth this combat
+local LEARN_RATIO_MIN, LEARN_RATIO_MAX = 0.5, 2.5  -- real vs description outside this: something else got mixed in
+local LEARN_WEIGHT_CAP = 20             -- older fights count as at most this many ticks, so gear changes catch up
+
+-- spells: the damage meter's per-spell rows for the combat that just ended ({ spellID, totalAmount }).
+-- Learns a real average tick for every DoT whose ticks were counted this combat, then starts a new tally.
+-- Returns how many sizes were learned.
+local function learnFromMeter(spells)
+    db.tickWeights = db.tickWeights or {}
+    local totals = {}
+    for _, sp in ipairs(spells or {}) do
+        local id, amount = sp.spellID, sp.totalAmount
+        if not isSecret(id) and not isSecret(amount) and type(amount) == "number" then totals[id] = amount end
+    end
+    local keysPerSpell = {}
+    for _, t in pairs(combatTally) do keysPerSpell[t.spellID] = (keysPerSpell[t.spellID] or 0) + 1 end
+    local learned = 0
+    for key, t in pairs(combatTally) do
+        local total, name = totals[t.spellID], t.name or tostring(t.spellID)
+        if t.factors < LEARN_MIN_FACTORS then
+            if t.ticks > 0 then trace(string.format("LEARN %s skipped: only %d tick(s) counted", name, t.ticks)) end
+        elseif not total then
+            trace(string.format("LEARN %s skipped: no readable damage meter total", name))
+        elseif keysPerSpell[t.spellID] > 1 then
+            trace(string.format("LEARN %s skipped: several combo point sizes share one meter total", name))
+        else
+            local ratio = total / (t.direct + t.descTick * t.factors)
+            if ratio < LEARN_RATIO_MIN or ratio > LEARN_RATIO_MAX then
+                trace(string.format("LEARN %s skipped: meter %d over %d tick(s) is %.2fx the description", name,
+                    total, t.ticks, ratio))
+            else
+                local tick = ratio * t.descTick
+                local old, weight = db.ticks[key], math.min(db.tickWeights[key] or 0, LEARN_WEIGHT_CAP)
+                if not old then weight = 0 end
+                local blended = (((old or 0) * weight) + tick * t.factors) / (weight + t.factors)
+                db.ticks[key] = math.floor(blended * 10 + 0.5) / 10
+                db.tickWeights[key] = weight + t.factors
+                learned = learned + 1
+                trace(string.format("LEARN %s: meter %d over %d tick(s)%s = %.1f per tick (description %.1f), saved %.1f",
+                    name, total, t.ticks, t.direct > 0 and " minus upfront hit" or "", tick, t.descTick, db.ticks[key]))
+            end
+        end
+    end
+    for k in pairs(combatTally) do combatTally[k] = nil end
+    return learned
+end
+ns.learnFromMeter = learnFromMeter
 
 local function onUnitCombat(unit, action, flag, amount, school)
     if isSecret(action) then return end
@@ -1197,11 +1288,13 @@ ns.trace = trace
 
 function ns.resetLearnedTicks()
     wipe(db.ticks)
+    if db.tickWeights then wipe(db.tickWeights) end
     print(T("Learned tick sizes cleared."))
 end
 
 function ns.forgetLearnedTick(key)
     db.ticks[key] = nil
+    if db.tickWeights then db.tickWeights[key] = nil end
     trace("FORGET learned tick size for " .. tostring(key))
 end
 
@@ -1359,6 +1452,48 @@ frame:SetScript("OnUpdate", function(self, elapsed)
     ns.refresh()
 end)
 
+-- After combat: read this combat's per-spell totals from the damage meter and learn tick sizes from them. The
+-- totals can take a moment to stop being secret, so it tries a few times.
+local function meterSpellsNow()
+    local DM = C_DamageMeter
+    if type(DM) ~= "table" or not DM.GetCombatSessionSourceFromType then return nil, "no damage meter" end
+    local dmgType = Enum and Enum.DamageMeterType and Enum.DamageMeterType.DamageDone or 0
+    local current = Enum and Enum.DamageMeterSessionType and Enum.DamageMeterSessionType.Current or 1
+    local ok, src = pcall(DM.GetCombatSessionSourceFromType, current, dmgType, UnitGUID("player"))
+    if not ok or type(src) ~= "table" then return nil, "unreadable" end
+    local okN, n = pcall(function() return #src.combatSpells end)
+    if not okN or isSecret(n) then return nil, "secret" end
+    local spells = {}
+    for i = 1, n do
+        local sp = src.combatSpells[i]
+        if isSecret(sp.totalAmount) or isSecret(sp.spellID) then return nil, "secret" end
+        spells[i] = { spellID = sp.spellID, totalAmount = sp.totalAmount }
+    end
+    return spells
+end
+
+local function learnAfterCombat(triesLeft)
+    if InCombatLockdown() then return end -- a new fight started: its own end will learn
+    local spells, why = meterSpellsNow()
+    if not spells and why == "secret" and triesLeft > 0 then
+        C_Timer.After(0.5, function() learnAfterCombat(triesLeft - 1) end)
+        return
+    end
+    if not spells then
+        trace("LEARN skipped: damage meter " .. tostring(why))
+        for k in pairs(combatTally) do combatTally[k] = nil end
+        return
+    end
+    learnFromMeter(spells)
+end
+
+local meterFrame = CreateFrame("Frame")
+meterFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+meterFrame:SetScript("OnEvent", function()
+    if not db or next(combatTally) == nil then return end
+    C_Timer.After(0.5, function() learnAfterCombat(6) end)
+end)
+
 ---------------------------------------------------------------------------
 -- Slash commands
 ---------------------------------------------------------------------------
@@ -1388,6 +1523,7 @@ SlashCmdList.DOESITDIE = function(msg)
         print(db.debug and T("Debug ON.") or T("Debug OFF."))
     elseif cmd == "reset" then
         wipe(db.ticks)
+        if db.tickWeights then wipe(db.tickWeights) end
         print(T("Learned tick sizes cleared."))
     elseif cmd == "ticks" then
         ns.toggleTickViewer()

@@ -26,6 +26,7 @@ be displayed but not compared or used in math. Verified in-game on the 1.60.1 be
 | Combo points | Enemy GUIDs |
 | Some Blizzard frames' strata/level | Your stats **out** of combat |
 | `UNIT_COMBAT` damage **amounts** in combat (since 2026-11, issue #26) | `UNIT_COMBAT` action and school |
+| | Damage meter per-spell totals (`C_DamageMeter`) after combat |
 
 Registering `COMBAT_LOG_EVENT_UNFILTERED` is forbidden: it raises a "blocked action" popup even under `pcall`.
 
@@ -109,6 +110,16 @@ Consequences for the design:
    **Hidden amounts** (issue #26): when a hit's amount is secret but its school isn't, it's matched on school and
    timing alone (`onHiddenAmountHit`): it counts as a tick and keeps the rhythm, but teaches no size, so the
    estimate stays on the learned or description tick. A resisted DoT still gets no ticks and is dropped.
+   **Sizes from the damage meter:** each hidden tick is tallied per learned-size key (`combatTally`, with Agony's
+   shape factor), plus the description's upfront hit for spells like Immolate (`parseDirectPart`). On
+   `PLAYER_REGEN_ENABLED` the damage meter's per-spell totals for the combat that just ended
+   (`C_DamageMeter.GetCombatSessionSourceFromType`, Current, DamageDone, the player) are read, retried while
+   secret, and `learnFromMeter` turns each total into an average tick: total / (upfront + description tick ×
+   factors) × description tick. Skipped below two ticks' worth, outside 0.5–2.5× the description, or when one
+   spell has several combo point keys. Blended with the saved size by tick count (`db.tickWeights`, older fights
+   capped at 20 ticks). Ticks on a mob with no target, focus or plate aren't counted, so such a fight learns a
+   bit high. Verified in-game (2026-11-05, warlock): after combat, Current gave readable per-spell totals for
+   Corruption, Bane of Agony and Immolate, with every tick of the fight counted as hidden.
 5. **Mob keys:** DoTs are kept per mob by GUID. In instances creature GUIDs are reportedly secret (PR #8), so a
    mob with a nameplate is keyed `plate:nameplateN` instead (`plateTokenFor`: the token stays the mob's while its
    plate is up; `NAME_PLATE_UNIT_ADDED/REMOVED` drop that key's DoTs before the token goes to another mob). With
