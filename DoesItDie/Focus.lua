@@ -113,9 +113,13 @@ local STRATA_RANK = {
 local LAYER_CHECK_INTERVAL = 1
 local layerCheckedAt, topStrata, topLevel, layerBar = -math.huge, nil, nil, nil
 
+local MAX_LAYER_FRAMES = 300 -- as in Display.lua: other addons' frames under it can make the walk slow (#36)
+
 local function topLayer(root)
-    local bestStrata, bestLevel = "BACKGROUND", 0
+    local bestStrata, bestLevel, visited = "BACKGROUND", 0, 0
     local function visit(frame, depth)
+        visited = visited + 1
+        if visited > MAX_LAYER_FRAMES then return end
         -- Some of Blizzard's frames report a secret strata/level; those are skipped (their children aren't).
         local strata, level = frame:GetFrameStrata(), frame:GetFrameLevel()
         if not isSecret(strata) and not isSecret(level) then
@@ -127,7 +131,10 @@ local function topLayer(root)
             end
         end
         if depth < 6 then
-            for _, child in ipairs({ frame:GetChildren() }) do visit(child, depth + 1) end
+            for _, child in ipairs({ frame:GetChildren() }) do
+                if visited > MAX_LAYER_FRAMES then break end
+                visit(child, depth + 1)
+            end
         end
     end
     visit(root, 0)

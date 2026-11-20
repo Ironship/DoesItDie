@@ -1,5 +1,9 @@
 # DoesItDie
 
+## Unreleased
+
+- **No more once-a-second stutter after long sessions** (issue #36). A layering check on the target frame ran every second even with nothing to show, and got slower as other addons hung frames there. It now only runs while the marker or kill icon is showing, and stops after 300 frames. If it's ever slow, the `/did debug` log says so once (`SLOW layer check`).
+
 ## v0.9.4
 
 - **Rip and Rupture no longer vanish when an auto-attack misses at the same moment.** A miss right after a finisher was always taken as the finisher missing. Now the addon checks your combo points: if they were spent, the finisher landed and its marker stays.
