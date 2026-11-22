@@ -150,6 +150,7 @@ plate.UnitFrame.healthBar = mock("StatusBar", plate.UnitFrame)
 C_NamePlate = { GetNamePlateForUnit = function(unit) if unit == "nameplate1" then return plate end end }
 function UnitGUID(unit) if unit == "target" or unit == "nameplate1" then return targetGuid end end
 function UnitIsDead() return false end
+function UnitClass() return "Mage", "MAGE" end
 combat = false
 function UnitAffectingCombat() return combat end
 function InCombatLockdown() return combat end
@@ -444,47 +445,116 @@ def exec_log():
     return [line for line in G.DoesItDieDB.log.values() if "EXEC" in line]
 
 
-def execute_bar():
-    return next((f for f in G.frames.values() if f.kind == "StatusBar" and f.width == 50000), None)
+def exec_bar():
+    return next((f for f in G.DoesItDieExecute.children.values() if f.kind == "StatusBar"), None)
 
+
+def estimate():
+    result = ns.execute.estimate()
+    return result[0] if isinstance(result, tuple) else result
+
+
+ex = ns.execute
+check("Execute tooltip read: base and rage", list(ex.parseHit(
+    "Attempt to finish off a wounded foe, causing 600 damage and converting each extra point of rage into 15 "
+    "additional damage. Only usable on enemies that have 20% or less health.")), [600, 600, 15])
+check("Hammer of Wrath tooltip read: range", list(ex.parseHit(
+    "Hurls a hammer that strikes an enemy for 474 to 522 Holy damage. Only usable on enemies that have 20% or "
+    "less health.")), [474, 522, 0])
+check("German tooltip: first numbers, percent left out", list(ex.parseHit(
+    "Nur bei Gegnern mit 20% Gesundheit oder weniger. Schleudert einen Hammer, der 474 bis 522 Heiligschaden "
+    "verursacht.")), [474, 522, 0])
+check("no number: nothing", ex.parseHit("Does something."), None)
 
 G.targetGuid = "Creature-0-1-2-3-3099-000001"
-step("/did exec (no curve API)", lambda: (G.SlashCmdList.DOESITDIE("exec"), H.update(0.2)))
-check("  probe logged the missing curve API", any("curve: UnitHealthPercent missing" in l for l in exec_log()), True)
-check("  geometry bar fed the target's health", execute_bar().value if execute_bar() else None, 100)
+step("/did exec as a mage: nothing to watch", lambda: G.SlashCmdList.DOESITDIE("exec"))
+check("  says so", "No execute ability found" in chat_text().splitlines()[-1], True)
 lua.execute("""
-    function UnitHealthPercent(unit, usePredicted, curve)
-        if curve then return curve:Evaluate(0.5) end
-        return 1
-    end
-    Enum.LuaCurveType = { Linear = 0, Step = 1 }
-    C_CurveUtil = { CreateColorCurve = function()
-        local c = { points = {} }
-        function c:SetType() end
-        function c:AddPoint(x, color) table.insert(self.points, { x = x, color = color }) end
-        function c:Evaluate(x)
-            local found = self.points[1].color
-            for _, p in ipairs(self.points) do if x >= p.x then found = p.color end end
-            return { a = found[4], GetRGBA = function() return unpack(found) end }
-        end
-        return c
-    end, CreateCurve = function()
-        local c = { points = {} }
-        function c:SetType() end
-        function c:AddPoint(x, y) table.insert(self.points, { x = x, y = y }) end
-        function c:Evaluate(x)
-            local found = self.points[1].y
-            for _, p in ipairs(self.points) do if x >= p.x then found = p.y end end
-            return found
-        end
-        return c
-    end }
+    playerClass = "PALADIN"
+    function UnitClass() return "Paladin", playerClass end
+    function IsPlayerSpell(id) return id == 24239 or id == 20662 end
+    function GetSpellCritChance() return 10 end
+    function GetCritChance() return 20 end
+    rage = 40
+    function UnitPower(unit, kind) if kind == 1 then return rage end return 0 end
+    local spells = { [24239] = { "Hammer of Wrath", "Hurls a hammer that strikes an enemy for 474 to 522 Holy "
+        .. "damage. Only usable on enemies that have 20% or less health." },
+        [20662] = { "Execute", "Attempt to finish off a wounded foe, causing 600 damage and converting each extra "
+        .. "point of rage into 15 additional damage. Only usable on enemies that have 20% or less health." } }
+    local name, desc = C_Spell.GetSpellName, C_Spell.GetSpellDescription
+    C_Spell.GetSpellName = function(id) return spells[id] and spells[id][1] or name(id) end
+    C_Spell.GetSpellDescription = function(id) return spells[id] and spells[id][2] or desc(id) end
+    C_Spell.GetSpellTexture = function(id) return 135000 + id end
+    targetHealth = 1000
+    function UnitHealth(unit) if unit == "target" then return targetHealth end return 100 end
 """)
-step("/did exec 35 (with a fake curve API)", lambda: (G.SlashCmdList.DOESITDIE("exec 35"), H.update(0.2)))
-check("  curve built at 0.35", any("threshold point at 0.35" in l for l in exec_log()), True)
-check("  no B errors", any("EXEC B error" in l for l in exec_log()), False)
-step("/did exec stops it", lambda: G.SlashCmdList.DOESITDIE("exec"))
-check("  probe off", G.DoesItDieExecuteProbe.shown, False)
+step("spells loaded as a paladin", lambda: (H.fire("SPELLS_CHANGED"), H.update(0.2)))
+check("  watching Hammer of Wrath", any("watching Hammer of Wrath (24239)" in l for l in exec_log()), True)
+check("  estimate is the tooltip's low end", estimate(), 474)
+check("  1000 health: bar not full", (exec_bar().max, exec_bar().value) if exec_bar() else None, (1000, 474))
+G.targetHealth = 400
+step("target at 400 health", lambda: H.update(0.2))
+check("  bar full: the icon shows", (exec_bar().max, exec_bar().value), (400, 400))
+check("  window shown", G.DoesItDieExecute.shown, True)
+lua.execute("C_Spell.IsSpellUsable = function() return false end")
+step("the game says it can't be cast", lambda: H.update(0.2))
+check("  hidden", G.DoesItDieExecute.shown, False)
+lua.execute("C_Spell.IsSpellUsable = nil")
+
+
+def hammer_fight(casts, meter_total):
+    G.combat = True
+    for i in range(casts):
+        H.fire("UNIT_SPELLCAST_SENT", "player", "", "how-%d" % i, 24239)
+        H.fire("UNIT_SPELLCAST_SUCCEEDED", "player", "how-%d" % i, 24239)
+    G.combat = False
+    return ex.learn(lua.table_from([lua.table_from({"spellID": 24239, "totalAmount": meter_total})]),
+                    ex.takeTally())
+
+
+# Two casts averaging 600 with 10% crits at 1.5x: 600 / 1.05 = 571.4 a hit, vs the tooltip's 498 average.
+check("learned from the damage meter", hammer_fight(2, 1200), 1)
+check("  ratio saved", G.DoesItDieDB.execRatios[24239].ratio, round(1200 / 1.05 / 996, 3))
+check("  estimate scales the low end", round(estimate()), round(474 * round(1200 / 1.05 / 996, 3)))
+check("a meter total far off the tooltip isn't learned", hammer_fight(1, 5000), 0)
+
+lua.execute("""playerClass = "WARRIOR" """)
+step("spells changed: now a warrior", lambda: (H.fire("SPELLS_CHANGED"), H.update(0.2)))
+check("  Execute with 40 rage: 600 + 25 extra x 15", estimate(), 975)
+
+
+def execute_fight(rage_readable):
+    G.combat = True
+    if not rage_readable:
+        lua.execute("UnitPower = function() return nil end")
+    H.fire("UNIT_SPELLCAST_SENT", "player", "", "ex-1", 20662)
+    H.fire("UNIT_SPELLCAST_SUCCEEDED", "player", "ex-1", 20662)
+    G.combat = False
+    return ex.learn(lua.table_from([lua.table_from({"spellID": 20662, "totalAmount": 1100})]), ex.takeTally())
+
+
+check("Execute without readable rage isn't learned", execute_fight(False), 0)
+check("  and the estimate is the base 600", estimate(), 600)
+check("  log says why", any("rage wasn't readable" in l for l in exec_log()), True)
+lua.execute("function UnitPower(unit, kind) if kind == 1 then return rage end return 0 end")
+# 40 rage at send: 600 + 375 = 975 expected; a 1100 hit with 20% crits at 2x is 1100 / 1.2 = 916.7 a hit.
+check("Execute with readable rage learns", execute_fight(True), 1)
+check("  ratio", G.DoesItDieDB.execRatios[20662].ratio, round(1100 / 1.2 / 975, 3))
+step("/did exec prints the estimate and shows the icon", lambda: (G.SlashCmdList.DOESITDIE("exec"), H.update(0.2)))
+check("  printed", "Execute: 600 + 25 rage x 15" in chat_text(), True)
+check("  shown for the test", G.DoesItDieExecute.shown, True)
+step("/did reset forgets it", lambda: G.SlashCmdList.DOESITDIE("reset"))
+check("  gone", G.DoesItDieDB.execRatios[20662], None)
+step("5 seconds later, back to the real check", lambda: H.update(5.2))
+G.targetHealth = 100
+G.DoesItDieDB.execShow = False
+step("switched off", lambda: H.update(0.2))
+check("  hidden", G.DoesItDieExecute.shown, False)
+G.DoesItDieDB.execShow = True
+lua.execute("function UnitHealth() return 100 end; playerClass = 'MAGE'")
+step("back to a mage", lambda: (H.fire("SPELLS_CHANGED"), H.update(0.2)))
+check("  nothing watched, hidden", G.DoesItDieExecute.shown, False)
+check("  no errors in the execute icon's update", any("EXEC error" in l for l in exec_log()), False)
 G.targetGuid = None
 
 
@@ -588,14 +658,6 @@ step("switch nameplates off", plates_off)
 check("  marker hidden", markers[0].shown if markers else None, False)
 check("  kill icon hidden", icon_windows[0].shown if icon_windows else None, False)
 
-step("/did exec with Corruption on the target (kill icon curve, C)",
-     lambda: (G.SlashCmdList.DOESITDIE("exec"), H.update(0.2)))
-check("  C uses the float curve", any("kill curve mode: alpha" in l for l in exec_log()), True)
-check("  C curve stepped past Corruption's 40", any("step at 40.5; plain check: alpha at 40=1, at 41=0" in l
-                                                   for l in exec_log()), True)
-check("  C applied without error", any("alpha: applied without error" in l for l in exec_log()), True)
-check("  no C errors", any("EXEC C" in l and "error:" in l for l in exec_log()), False)
-step("/did exec stops it again", lambda: G.SlashCmdList.DOESITDIE("exec"))
 
 # Custom target frame (Advanced tab), as for a unit frame addon that replaces Blizzard's target frame.
 lua.execute("""

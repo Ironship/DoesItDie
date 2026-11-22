@@ -97,6 +97,11 @@ local DEFAULTS = {
     skullPulse = true,
     skullOffsetX = 0,
     skullOffsetY = 0,
+    -- Execute kill icon (Execute.lua): the execute ability's icon above the kill icon when its hit would kill
+    execShow = true,
+    execSize = 32,
+    execOffsetX = 0,
+    execOffsetY = 4,
     -- Damage marker
     showMarkers = true,
     fillTexture = "stripes",
@@ -1664,6 +1669,7 @@ local function meterSpellsNow()
     if not ok then return nil, "unreadable" end
     return spells, why
 end
+ns.readDamageMeter = meterSpellsNow -- Execute.lua learns its hit sizes from the same totals
 
 local function learnAfterCombat(counted, triesLeft)
     if InCombatLockdown() then
@@ -1709,8 +1715,8 @@ SlashCmdList.DOESITDIE = function(msg)
         end
     elseif cmd == "plates" then
         ns.probeNameplates()
-    elseif cmd:match("^exec") then
-        ns.toggleExecuteProbe(tonumber(cmd:match("%d+")))
+    elseif cmd == "exec" then
+        ns.executeCommand()
     elseif cmd == "skull" then
         ns.display.testSkull(5)
         print(T("Kill icon test for 5 seconds: one icon ON the portrait (the real one) and one ABOVE it (plain test)."))
@@ -1720,6 +1726,7 @@ SlashCmdList.DOESITDIE = function(msg)
     elseif cmd == "reset" then
         wipe(db.ticks)
         if db.tickWeights then wipe(db.tickWeights) end
+        ns.forgetExecuteLearning()
         print(T("Learned tick sizes cleared."))
     elseif cmd == "ticks" then
         ns.toggleTickViewer()
@@ -1730,7 +1737,7 @@ SlashCmdList.DOESITDIE = function(msg)
             "/did line - toggle health bar markers on/off",
             "/did skull - show the kill icon for 5 seconds to check its position",
             "/did plates - check what the addon can reach on visible nameplates (logged)",
-            "/did exec [percent] - test showing when the target is below 20% (or the given percent); again to stop",
+            "/did exec - show the execute icon for 5 seconds and what its hit is estimated at",
             "/did debug - toggle echoing the trace log (casts, ticks, estimates) to chat",
             "/did ticks - show learned tick sizes",
             "/did reset - forget learned tick sizes",
