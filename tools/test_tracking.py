@@ -60,6 +60,9 @@ function GetModifiedClick(action) if action == "MOUSEOVERCAST" then return mouse
 function IsModifiedClick(action) if action == "MOUSEOVERCAST" then return mouseoverCast.held end end
 -- Combo points: the API's reading (nil while secret), and Blizzard's display (ComboFrame, set by api.comboDisplay).
 local comboReading
+-- The player's class (UnitClass's second return): stacking DoTs only stack for their own class.
+local playerClass = "DRUID"
+function UnitClass() return playerClass, playerClass end
 function GetComboPoints() return comboReading end
 local castCount = 0
 local SPELLS = {
@@ -83,6 +86,8 @@ local SPELLS = {
     [17] = { "Flame Shock", "Instantly sears the target with fire, causing 20 Fire damage immediately and 28 Fire damage over 12 sec." },
     [18] = { "Immolation", "Brûle l’ennemi et lui inflige 22 points de dégâts de feu, puis 32 points supplémentaires de dégâts de feu en 15 sec." },
     [19] = { "Feuerbrand", "Verbrennt den Gegner und fügt ihm 11 Feuerschaden sowie im Verlauf von 15 Sek. insgesamt 20 zusätzlichen Feuerschaden zu." },
+    [20] = { "Lacerate", "Lacerates the enemy target, making them bleed for 20 damage over 15 sec plus 10% weapon damage per existing application of Lacerate on the target. This effect stacks up to 5 times on the same target." },
+    [21] = { "Lacerate", "Wounds the target causing them to bleed for 406 damage over 21 sec." },
     [15] = { "Explosive Trap", "Place a Fire trap that explodes when an enemy approaches, causing 201 to 257 Fire damage and 330 additional Fire damage over 20 sec to all within 10 yards. Trap will exist for 1 min. Only one Fire trap can be active at a time." },
 }
 local function spellNameAndDescription(id) return SPELLS[id][1], SPELLS[id][2] end
@@ -103,6 +108,7 @@ function api.reset(waitMode, estimateDuringCast)
     targetKey, plates, names, attackable, deadUnits, comboReading = "mob", {}, {}, {}, {}, nil
     mouseoverCast.enabled, mouseoverCast.key, mouseoverCast.held = false, "NONE", false
     ComboFrame = nil
+    playerClass = "DRUID"
     log = {}
 end
 function api.learn(spellID, perTick) db.ticks[spellID] = perTick end
@@ -144,6 +150,7 @@ function api.meter(...)
 end
 function api.weight(key) return db.tickWeights and db.tickWeights[key] end
 function api.advance(seconds) now = now + seconds; housekeep(now) end
+function api.time() return now end
 function api.marker() local damage, count = targetRemainingDamage(); return damage .. " dmg from " .. count .. " DoT(s)" end
 function api.markerOn(key) local total = 0; for _, e in ipairs(dotBreakdown(key)) do total = total + e.damage end; return math.floor(total + 0.5) .. " dmg" end
 function api.counted() return countedPoints end
@@ -154,6 +161,7 @@ function api.mouseoverCast(enabled, key, held)
     mouseoverCast.enabled, mouseoverCast.key, mouseoverCast.held = enabled, key or "NONE", held == true
 end
 function api.dead(unit, value) deadUnits[unit] = value end
+function api.playerClass(class) playerClass = class end
 -- The combat-end swap (PLAYER_REGEN_ENABLED): this combat's tally, the next one starting empty.
 function api.endCombat() return takeCombatTally() end
 function api.meterFor(counted, ...)
@@ -830,6 +838,61 @@ for _ in range(2):
 hidden_ticks(2, 3, 32)
 check("Meter: readable and hidden ticks in one combat: the readable size stands",
       (sim.meter(16, 46), sim.learned(16)), (0, 11))
+
+# Lacerate stacks (in-game log 2026-11-13): a new stack keeps the running tick rhythm and refreshes the duration.
+# Each recast used to restart the tick schedule, so no tick matched and Lacerate was dropped as "never ticked".
+def at(t):  # advance to `t` seconds after the scenario's start
+    sim.advance(base + t - sim.time())
+
+sim.reset(); base = sim.time(); sim.learn(20, 4); sim.cast(20)
+at(1.5); sim.cast(20); at(3.05); sim.hiddenHit(1); at(4.5); sim.cast(20)
+check("Lacerate x3 (stacked at 1.5 and 4.5): 5 ticks left on the beat x 4 x 3", sim.marker(), "60 dmg from 1 DoT(s)")
+check("  the log names the stack", "stack 3" in sim.log(), True)
+for t in (6.05, 9.05, 12.05, 15.05, 18.05):
+    at(t); sim.hiddenHit(1)
+check("  every tick matched (1 before the third stack, 5 after)", ticks("Lacerate"), 6)
+check("  none dropped as never ticked", "DROP" in sim.log(), False)
+at(18.5)
+check("  gone after the refreshed duration", sim.marker(), "0 dmg from 0 DoT(s)")
+check("  meter 85 over factors 2 + 5x3 = 17: learns 5 per application", (sim.meter(20, 85), sim.learned(20)), (1, 5))
+
+sim.reset(); base = sim.time(); sim.learn(20, 4); sim.cast(20)
+for t in (1, 2):
+    at(t); sim.cast(20)
+at(3.05); sim.hiddenHit(1)
+for t in (3.5, 4.5, 5.5):
+    at(t); sim.cast(20)
+check("Lacerate cast 6 times: capped at 5 stacks (5 ticks x 4 x 5)", sim.marker(), "100 dmg from 1 DoT(s)")
+
+sim.reset(); base = sim.time(); sim.learn(20, 4); sim.cast(20); at(3.05); sim.hiddenHit(1); at(3.5); sim.cast(20); at(3.55); sim.avoid("DODGE")
+check("Lacerate stack dodged: the 1-stack one stays (4 ticks x 4)", sim.marker(), "16 dmg from 1 DoT(s)")
+for t in (6.05, 9.05, 12.05, 15.05):
+    at(t); sim.hiddenHit(1)
+check("  the dodged cast doesn't stop the meter learning (25 over 5 ticks)", (sim.meter(20, 25), sim.learned(20)),
+      (1, 5))
+
+sim.reset(); base = sim.time(); sim.learn(20, 4); sim.cast(20); at(3); sim.hit(4, 1); at(4); sim.cast(20); at(6); sim.hit(8, 1)
+check("Readable ticks: 4 at 1 stack, 8 at 2 stacks: both match, still 4 per application",
+      (ticks("Lacerate"), sim.learned(20)), (2, 4))
+
+# Replay of the 2026-11-13 log at 92550.3 (times relative to it): four Lacerates 1.5s apart, every Physical hit
+# (white hits and the bleed alike, amounts hidden). The bleed stayed on the first cast's beat (.3/.5 after it).
+sim.reset(); base = sim.time(); sim.learn(20, 4)
+events = [(0, "cast"), (0, 1), (0.2, 1), (1.5, "cast"), (1.5, 1), (2.2, 1), (3.0, "cast"), (3.0, 1), (3.2, 1),
+          (4.5, "cast"), (4.5, 1), (5.6, 1), (6.2, 1), (7.2, 1), (9.2, 1), (12.2, 1), (15.2, 1), (18.3, 1), (19.5, 1)]
+for t, what in events:
+    at(t)
+    if what == "cast":
+        sim.cast(20)
+    else:
+        sim.hiddenHit(what)
+check("Replay 92550.3: Lacerate x4 ticks through to its refreshed end", ticks("Lacerate"), 5)
+check("  not dropped as never ticked", "DROP" in sim.log(), False)
+
+# Forever's hunters have a Lacerate too (406 over 21 sec, no stacks): a recast refreshes it, as any other DoT.
+sim.reset(); sim.playerClass("HUNTER"); sim.learn(21, 10); sim.cast(21); sim.advance(1.5); sim.cast(21)
+check("Hunter's Lacerate recast: refreshed, not stacked (7 ticks x 10)", sim.marker(), "70 dmg from 1 DoT(s)")
+check("  the log names no stack", "stack 2" in sim.log(), False)
 
 # A DoT keeps the size it was applied with until its own first tick; Forget reaches it.
 sim.reset(); sim.learn(16, 15); sim.target("A"); sim.cast(16); sim.target("B"); sim.cast(16)

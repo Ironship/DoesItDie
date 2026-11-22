@@ -87,6 +87,7 @@ L.SPELL_IDS = {
     ["Mind Flay"] = 15407, ["Arcane Missiles"] = 5143, ["Starshards"] = 10797,
     ["Immolation Trap"] = 13795, ["Explosive Trap"] = 13813, ["Wyvern Sting"] = 19386,
     ["Serpent Sting"] = 1978, ["Pyroblast"] = 11366, ["Corruption"] = 172,
+    ["Lacerate"] = 1328617, -- Forever's own ID (STACKING_DOTS; not in Classic Era)
 }
 
 -- Gives `alias` the entry `englishName` has, in every table that has one and doesn't know `alias` yet.

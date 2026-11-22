@@ -78,9 +78,18 @@ local IGNORED_SPELLS = {
 -- first plausible unmatched tick of its school while it's armed. See springTrap.
 local TRAP_DOTS = { ["Immolation Trap"] = true }
 
+-- DoTs that stack on one mob, with their stack cap: each cast adds an application. Seen in-game on Forever
+-- (Lacerate, log 93290.7 and 92550.3, 2026-11-13): a new stack keeps the running tick rhythm (hits stayed on the
+-- first cast's 3s beat through four recasts) and refreshes the duration. Re-anchoring on each recast lost every
+-- tick and dropped Lacerate as "never ticked". Each tick is assumed to be one application's tick times the stacks
+-- (as in TBC; unverified on Forever); learned sizes are per application (see stackOnto, tickShape).
+-- Forever's hunters have a Lacerate too (one bleed over 21 sec, no stacks), hence the class: theirs refreshes.
+local STACKING_DOTS = { ["Lacerate"] = { cap = 5, class = "DRUID" } }
+
 -- The name-keyed tables also answer to the names of every registered language, and on ADDON_LOADED to the names
 -- this client reports for them (Locale.lua).
-local NAME_TABLES = { KNOWN_TICK_INTERVALS, TICK_SHAPES, SCHOOL_BY_NAME, IGNORED_SPELLS, PROJECTILE_DOTS, TRAP_DOTS }
+local NAME_TABLES = { KNOWN_TICK_INTERVALS, TICK_SHAPES, SCHOOL_BY_NAME, IGNORED_SPELLS, PROJECTILE_DOTS, TRAP_DOTS,
+    STACKING_DOTS }
 ns.locale.addNames(NAME_TABLES)
 
 local SCHOOL_MASKS = {
@@ -382,12 +391,14 @@ local function tickNumberAt(dot, when)
     return math.max(1, math.floor((when - dot.appliedAt) / dot.interval + 0.5))
 end
 
--- The factor for tick `number` (1 for evenly ticking DoTs). Shapes are stretched to the DoT's tick count.
+-- The factor for tick `number` (1 for evenly ticking DoTs). Shapes are stretched to the DoT's tick count. A
+-- stacking DoT's ticks are also times its stacks, so sizes are learned and tallied per application.
 local function tickShape(dot, number)
+    local stacks = dot.stacks or 1
     local shape = dot.shape
-    if not shape then return 1 end
+    if not shape then return stacks end
     local i = math.ceil(math.min(math.max(number, 1), dot.totalTicks) / dot.totalTicks * #shape)
-    return shape[math.max(1, math.min(i, #shape))]
+    return shape[math.max(1, math.min(i, #shape))] * stacks
 end
 
 -- A waiting DoT doesn't count toward the marker until its first tick lands (see WAIT_MODES).
@@ -674,8 +685,10 @@ local function removeAvoidedDot(cast, action, school)
             return true
         end
     end
+    dot.avoided = true -- dealt nothing, so its missing ticks don't stop the meter learning (meterSkipReason)
     if cast.previous then
         dots[cast.name] = cast.previous
+        cast.previous.stackedInto = nil
         trace(string.format("AVOID %s (school %s) right after %s recast; keeping the earlier one", action,
             tostring(school), cast.name))
     else
@@ -714,6 +727,7 @@ local function resolveFinisherCheck(now)
     if (dots and dots[cast.name]) ~= check.replaced or now >= check.dot.expiresAt then return end
     dotsByTarget[cast.key] = dots or {}
     dotsByTarget[cast.key][cast.name] = check.dot
+    check.dot.avoided = nil
     trace(string.format("COMBO after %s's %s: %s (had %d), spent: it landed, restored", cast.name, check.action,
         readings, cast.comboRead))
 end
@@ -813,6 +827,23 @@ local function newDot(spellID, tickKey, name, total, school, duration, statedInt
     }
 end
 
+-- A stacking DoT cast on a mob that already has it: one more application (up to `cap`), on the running tick
+-- rhythm. The refreshed duration is counted from the latest tick slot, so a partial tick at the very end (the
+-- 2026-11-13 log had one, 15s after the last stack) isn't counted and the estimate errs low. The previous DoT's
+-- ticks carry over; it's kept as `previous` so an avoided stack puts it back (removeAvoidedDot).
+local function stackOnto(dot, previous, cap)
+    local anchor = previous.firstTickAt or previous.appliedAt
+    local slot = anchor + math.max(0, math.floor((dot.appliedAt - anchor) / previous.interval)) * previous.interval
+    dot.stacks = math.min(cap, (previous.stacks or 1) + 1)
+    dot.appliedAt, dot.nextTickAt, dot.expiresAt = slot, slot + dot.interval, slot + dot.duration
+    if previous.firstTickAt then dot.firstTickAt, dot.lastTickIndex = slot, 0 end
+    dot.ticksSeen, dot.tickSum, dot.normalTicks = previous.ticksSeen, previous.tickSum, previous.normalTicks
+    dot.lastTickAt, dot.lastTickAmount = previous.lastTickAt, previous.lastTickAmount
+    dot.lastTickShape, dot.lastTickCrit = previous.lastTickShape, previous.lastTickCrit
+    dot.missed, dot.doubtful, dot.learnedAtApply = previous.missed, previous.doubtful, previous.learnedAtApply
+    previous.stackedInto = dot -- its own ticks now count for this one (meterSkipReason)
+end
+
 -- Returns the target key the DoT was applied to, or nil if the cast wasn't a tracked DoT.
 local function onPlayerCast(spellID, castGUID)
     local key = castTargetKey(castGUID)
@@ -861,6 +892,9 @@ local function onPlayerCast(spellID, castGUID)
     dotsByTarget[key] = dotsByTarget[key] or {}
     local previous = dotsByTarget[key][name]
     local dot = newDot(spellID, tickKey, name, total, school, duration, statedInterval, now)
+    local stacking = STACKING_DOTS[name]
+    if stacking and stacking.class and select(2, UnitClass("player")) ~= stacking.class then stacking = nil end
+    if previous and stacking then stackOnto(dot, previous, stacking.cap) end
     dotsByTarget[key][name] = dot
     lastDotCast = { key = key, name = name, dot = dot, previous = previous, at = now,
         comboRead = isFinisher and comboSource == "read" and comboPoints or nil }
@@ -870,8 +904,10 @@ local function onPlayerCast(spellID, castGUID)
     -- The starting estimate is shaky without a learned tick size (description numbers leave out spell power
     -- and attack power) or, for finishers, without knowing the combo points.
     dot.unsure = not learned
-    trace(string.format("CAST %s (id %d)%s: %d dmg over %ss, school %d, tick every %ss, per-tick %s%s%s", name, spellID,
+    trace(string.format("CAST %s (id %d)%s%s: %d dmg over %ss, school %d, tick every %ss, per-tick %s%s%s", name, spellID,
         isFinisher and string.format(" %s combo points (%s)", comboPoints or "?", comboSource) or "",
+        dot.stacks and string.format(" stack %d (ticks kept on the beat, next at %+.1fs)", dot.stacks,
+            dot.nextTickAt - now) or "",
         total, duration, dot.school, dot.interval, learned and ("learned " .. learned) or "from description",
         isWaiting(dot) and ", waiting for first tick" or "",
         key ~= unitKey("target") and (" on " .. tostring(key) .. ", the target when sent") or ""))
@@ -1219,8 +1255,10 @@ local function meterSkipReason(key, t, counted, totals, keysPerSpell)
     -- aren't in this tally, so nothing can say whether every tick was seen.
     if #t.dots == 0 then return "not cast this combat" end
     if counted.untracked[t.spellID] then return "a cast had no known target, so the meter has damage not counted here" end
+    -- Not counted: an avoided cast (it dealt nothing) and a stack's earlier application (its ticks went on in
+    -- the stack that replaced it).
     for _, dot in ipairs(t.dots) do
-        if dot.ticksSeen == 0 then return "a cast's DoT never showed a tick (out of sight, or the mob died first)" end
+        if dot.ticksSeen == 0 and not dot.avoided and not dot.stackedInto then return "a cast's DoT never showed a tick (out of sight, or the mob died first)" end
     end
     if not totals[t.spellID] then return "no readable damage meter total" end
     if keysPerSpell[t.spellID] > 1 then return "several combo point sizes share one meter total" end
@@ -1388,7 +1426,7 @@ end
 local function remainingDamage(dot)
     if dot.nextTickAt > dot.expiresAt + dot.interval / 2 then return 0 end
     local ticksLeft = math.floor((dot.expiresAt - dot.nextTickAt) / dot.interval + 0.5) + 1
-    if not dot.shape then return ticksLeft * expectedTick(dot) end
+    if not dot.shape then return ticksLeft * expectedTick(dot) * (dot.stacks or 1) end
     local average, total = expectedTick(dot), 0
     for number = math.max(1, dot.totalTicks - ticksLeft + 1), dot.totalTicks do
         total = total + average * tickShape(dot, number)
@@ -1406,7 +1444,7 @@ local function dotBreakdown(key)
     for name, dot in pairs(dots or {}) do
         if not isWaiting(dot) and not (cast and name == cast.name) then
             table.insert(list, { name = name, spellID = dot.spellID, school = dot.school, appliedAt = dot.appliedAt,
-                expiresAt = dot.expiresAt, damage = remainingDamage(dot) })
+                expiresAt = dot.expiresAt, damage = remainingDamage(dot), stacks = dot.stacks })
         end
     end
     if cast and not isWaiting(cast.dot) then

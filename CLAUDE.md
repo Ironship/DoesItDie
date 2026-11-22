@@ -201,8 +201,14 @@ Known limitations:
   trap is armed can also be taken for it.
 - Proc DoTs with no cast (Deep Wounds, Ignite, poisons) aren't tracked. Their ticks show up as unmatched hits.
 - Uneven DoTs need a tick shape in `TICK_SHAPES` (Bane/Curse of Agony: 4 ticks at 0.5x, 4 at 1x, 4 at 1.5x the
-  average, confirmed in-game); anything uneven that isn't listed is treated as even. Lacerate's stacks are
-  approximated.
+  average, confirmed in-game); anything uneven that isn't listed is treated as even.
+- Stacking DoTs (`STACKING_DOTS`: the druid's Lacerate, up to 5; Forever's hunter Lacerate doesn't stack, hence the
+  class check): a recast adds a stack on the running tick rhythm and
+  refreshes the duration from the latest tick slot (`stackOnto`; both seen in-game, log 2026-11-13). Each tick
+  is assumed to be one application's tick times the stacks (unverified on Forever: its tooltip's "plus 10% weapon
+  damage per existing application" may mean something else); sizes are learned and tallied per application (the
+  stacks are part of `tickShape`'s factor), so meter-learned sizes that stay level across fights with different
+  stack counts confirm it. The partial tick at the very end of a refreshed Lacerate isn't counted (errs low).
 - Extra combo points from crits (Primal Fury, Seal Fate) aren't counted, so estimates err low.
 - Hunter **Black Arrow** (Forever reuses Classic's "150 Shadow damage and draining 150 mana over 30 sec")
   isn't tracked; its tick behavior is unverified.
