@@ -103,6 +103,8 @@ local paletteIndexByName, nextPaletteIndex = {}, 1
 
 -- mode: "school" or "each"; defaults to the target marker's setting (nameplates pass their own).
 local function dotColor(entry, mode)
+    -- Party members' DoTs (Party.lua) stand apart from yours in every color mode.
+    if entry.remote then return COLOR_BY_ID[db.partyDotColor] or COLOR_BY_ID.green end
     if (mode or db.dotColors) == "school" then
         return SCHOOL_COLORS[entry.school] or COLOR_BY_ID.white
     end
@@ -758,12 +760,20 @@ local STRATA_RANK = {
     BACKGROUND = 1, LOW = 2, MEDIUM = 3, HIGH = 4, DIALOG = 5, FULLSCREEN = 6, FULLSCREEN_DIALOG = 7, TOOLTIP = 8,
 }
 local LAYER_CHECK_INTERVAL = 1
+-- The walk below visits every frame under the target frame. Other addons can hang many frames there (and keep
+-- adding them), and a walk over thousands of frames every second caused ~80 ms stutters (issue #36), so it stops
+-- after this many. A walk slower than SLOW_LAYER_MS is logged once, naming the frame and the count.
+local MAX_LAYER_FRAMES = 300
+local SLOW_LAYER_MS = 10
 
--- Highest strata/level anywhere in the target frame's tree. Blizzard (Edit Mode) re-layers the target
--- frame after addons load, so a level picked once at load ends up underneath the health bar and portrait.
+-- Highest strata/level anywhere in the target frame's tree (and how many frames were visited). Blizzard (Edit
+-- Mode) re-layers the target frame after addons load, so a level picked once at load ends up underneath the
+-- health bar and portrait.
 local function targetFrameTopLayer()
-    local topStrata, topLevel = "BACKGROUND", 0
+    local topStrata, topLevel, visited = "BACKGROUND", 0, 0
     local function visit(frame, depth)
+        visited = visited + 1
+        if visited > MAX_LAYER_FRAMES then return end
         -- Some of Blizzard's frames report a secret strata/level in Forever; those can't be compared, so skip
         -- them (their children are still visited).
         local strata, level = frame:GetFrameStrata(), frame:GetFrameLevel()
@@ -776,27 +786,48 @@ local function targetFrameTopLayer()
             end
         end
         if depth < 6 then
-            for _, child in ipairs({ frame:GetChildren() }) do visit(child, depth + 1) end
+            for _, child in ipairs({ frame:GetChildren() }) do
+                if visited > MAX_LAYER_FRAMES then break end
+                visit(child, depth + 1)
+            end
         end
     end
     visit(layerRoot or healthBar or UIParent, 0)
-    return topStrata, topLevel
+    return topStrata, topLevel, visited
 end
 
--- Keeps our marker and skull above everything on the target frame. Checked while displaying (throttled)
--- because Blizzard can re-layer the frame at any time.
-local layerCheckedAt, lastStrata, lastLevel, layerErrorLogged = 0, nil, nil, false
+-- The bar can change without a target change (BetterBlizzFrames' settings; it also comes up late), so the
+-- attachment is rechecked once a second, whether or not anything is showing. It's cheap: a few lookups.
+local attachCheckedAt = 0
+local function recheckAttach(now)
+    if now - attachCheckedAt < LAYER_CHECK_INTERVAL then return end
+    attachCheckedAt = now
+    attach()
+end
+
+-- Keeps our marker and skull above everything on the target frame. Checked only while they show (throttled)
+-- because Blizzard can re-layer the frame at any time; nothing needs layering while they're hidden.
+local layerCheckedAt, lastStrata, lastLevel, layerErrorLogged, slowLayerLogged = 0, nil, nil, false, false
 local function updateLayering(now)
     if now - layerCheckedAt < LAYER_CHECK_INTERVAL then return end
     layerCheckedAt = now
-    attach() -- the bar can change without a target change (BetterBlizzFrames' settings; it also comes up late)
-    local ok, strata, level
+    local ok, strata, level, visited
     if previewHost then
         -- One strata above the options window: it's a top-level frame, which WoW raises above everything else
         -- in its own strata (our frames included) when it's shown or clicked. Dropdowns and tooltips sit higher.
         ok, strata, level = true, "FULLSCREEN", 1
     else
-        ok, strata, level = pcall(targetFrameTopLayer)
+        local clock = type(debugprofilestop) == "function" and debugprofilestop or nil
+        local started = clock and clock()
+        ok, strata, level, visited = pcall(targetFrameTopLayer)
+        local ms = started and (clock() - started)
+        local capped = ok and visited > MAX_LAYER_FRAMES
+        if ok and not slowLayerLogged and (capped or (ms and ms > SLOW_LAYER_MS)) then
+            slowLayerLogged = true
+            trace(string.format("SLOW layer check (logged once): %s frames under %s, %.1f ms",
+                capped and ("over " .. MAX_LAYER_FRAMES .. " (stopped there)") or tostring(visited),
+                regionName(layerRoot or healthBar), ms or -1))
+        end
     end
     if not ok then
         if not layerErrorLogged then
@@ -871,10 +902,11 @@ local lastTracedDamage
 local function refresh()
     local now = GetTime()
     ns.tracking.housekeep(now)
-    updateLayering(now)
+    recheckAttach(now)
     applyAppearance()
 
     if skullTestUntil and now < skullTestUntil then
+        updateLayering(now)
         skullBar:SetMinMaxValues(0, 1)
         skullBar:SetValue(1)
         skullWindow:Show()
@@ -896,6 +928,7 @@ local function refresh()
         if total <= 0 then return hideAll() end
         skullBar:SetMinMaxValues(0, math.max(previewState.health, 0.01))
         skullBar:SetValue(total)
+        updateLayering(now)
         skullWindow:SetShown(db.showSkull)
         setMarkerScale(100)
         local perDot = db.dotColors ~= "single"
@@ -935,6 +968,7 @@ local function refresh()
         return hideAll()
     end
 
+    updateLayering(now)
     skullWindow:SetShown(db.showSkull)
     if healthBar then
         label:SetText(perDot and breakdownText(breakdown) or string.format("DoTs: %d", damage))
@@ -963,6 +997,7 @@ function ns.setDisplayHost(host)
     previewHost = host
     layerCheckedAt = 0
     attach()
+    updateLayering(GetTime()) -- once now, so the widgets don't keep the window's strata until they next show
     safeRefresh()
     if host then
         -- Where things ended up on screen, once layout has settled (for diagnosing an invisible preview).
@@ -997,12 +1032,16 @@ ns.findById = findById
 ns.textureDir = TEXTURE_DIR
 ns.display = {
     schoolColors = SCHOOL_COLORS,
+    colorById = function(id) return COLOR_BY_ID[id] end,
     setDb = function(saved) db = saved end,
     attach = attach,
     animate = animateMarker,
     -- The target changed: its damage is traced again from the start.
     forgetTracedDamage = function() lastTracedDamage = nil end,
     hasHealthBar = function() return healthBar ~= nil end,
+    -- For Execute.lua: what the kill icon is centered on, the frame whose visibility the display follows, and
+    -- whether that's the options window's mock target frame.
+    killIconAnchor = function() return skullAnchor, visibilityFrame, previewHost ~= nil end,
     -- /did skull: show the kill icon for `seconds`, and log where it is.
     testSkull = function(seconds)
         skullTestUntil = GetTime() + seconds

@@ -845,6 +845,15 @@ local function buildTabs()
         { tooltip = "Pixels right (+) or left (-) of the portrait's center (or the custom spot's, see Advanced)." })
     icon:slider("skullOffsetY", "Vertical offset", -150, 150, 1,
         { tooltip = "Pixels up (+) or down (-) from the portrait's center (or the custom spot's, see Advanced)." })
+    icon:gap()
+    local function execOn(settings) return settings.execShow end
+    icon:checkbox("execShow", "Show when your execute or finisher will kill", { tooltip = "Shows your execute or finisher "
+        .. "(Execute, Hammer of Wrath, Shadow Word: Death, Shadowburn, Ferocious Bite or Eviscerate) above the "
+        .. "portrait when its hit would kill the target. Finishers use your current combo points. The hit is estimated low (from the tooltip, then learned from the damage "
+        .. "meter after each fight), so it may show a little late but shouldn't show too early." })
+    icon:slider("execSize", "Execute icon size", 16, 64, 2, { enabledIf = execOn })
+    icon:slider("execOffsetX", "Execute icon horizontal offset", -150, 150, 1, { enabledIf = execOn })
+    icon:slider("execOffsetY", "Execute icon vertical offset", -150, 150, 1, { enabledIf = execOn })
 
     local marker = addTab("Marker")
     marker:checkbox("showMarkers", "Show damage marker", { tooltip = "Marks the damage your DoTs still have to "
@@ -862,6 +871,12 @@ local function buildTabs()
     marker:slider("outlineThickness", "Outline thickness", 1, 8, 1, { enabledIf = hasOutline })
     marker:choice("outlineColor", "Outline color", lists.colors, { enabledIf = hasOutline })
     marker:slider("outlineOpacity", "Outline opacity", 10, 100, 5, { suffix = "%", enabledIf = hasOutline })
+    marker:gap()
+    marker:checkbox("partyDots", "Share DoTs with party", { tooltip = "Adds your party members' DoTs to the "
+        .. "marker and kill icon, and sends them yours. Each of you needs DoesItDie with this on. Open world only: "
+        .. "paused in dungeons and boss fights." })
+    marker:choice("partyDotColor", "Party DoT color", lists.colors,
+        { enabledIf = function(s) return s.partyDots end, tooltip = "Party members' DoTs, in every DoT color mode." })
 
     local effects = addTab("Effects")
     effects:checkbox("smoothMotion", "Smooth motion",
