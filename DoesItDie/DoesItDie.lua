@@ -274,6 +274,15 @@ local function schoolFromWords(words)
     return school
 end
 
+-- English thousands separators: "1,002 Shadow damage" -> "1002 Shadow damage". Without this the patterns below start
+-- after the comma and read 2 (rank 6 Shadow Word: Pain, Bane of Agony). Only a comma between a digit and exactly
+-- three digits counts, applied twice for "1,234,567". Other languages get the description untouched: their files
+-- read their own separators ("1.132", "1 132").
+local function plainNumbers(desc)
+    for _ = 1, 2 do desc = desc:gsub("(%d),(%d%d%d)%f[^%d]", "%1%2") end
+    return desc
+end
+
 -- Finishers (Rip, Rupture) list their DoT per combo point:
 --   "1 point : 243 damage over 12 sec. 2 points: 396 damage over 12 sec. ..."   (Rip; note the stray space)
 --   "1 point: 25 damage over 8 secs\n ... 5 points: 87 damage over 16 secs"      (Rupture)
@@ -299,6 +308,8 @@ end
 -- recognised by "Finishing move", not "combo point".)
 local function parseDot(desc, comboPoints)
     if type(desc) ~= "string" or isSecret(desc) then return nil end
+    local original = desc
+    desc = plainNumbers(desc)
     if desc:find("Finishing move") then return parseFinisher(desc, comboPoints or 5) end
     -- Weapon enchants (rogue poisons) describe a proc DoT but aren't cast on the target. Match the enchant
     -- wording only: Lacerate's tooltip also mentions "weapon damage".
@@ -325,7 +336,7 @@ local function parseDot(desc, comboPoints)
         end
     end
     -- Not English DoT wording: try the registered languages (Locale.lua).
-    return ns.locale.parseDot(desc, comboPoints or 5)
+    return ns.locale.parseDot(original, comboPoints or 5)
 end
 
 -- The upfront hit of a spell that also leaves a DoT: the damage named before the DoT's own clause, averaged for a
@@ -343,6 +354,7 @@ end
 local function parseDirectPart(desc)
     if type(desc) ~= "string" or isSecret(desc) then return nil end
     if desc:find("damage") or desc:find("health") then
+        desc = plainNumbers(desc)
         -- The DoT's clause is the last "<n> ... damage over <n> sec" (not Wrack's "damage over time effects");
         -- what comes before it is the upfront part.
         local clauseAt

@@ -90,6 +90,30 @@ CASES = [
     ("Forever", "Rupture (3 pts, guessed text)", "Finishing move that causes damage over time, increased by your attack power. Lasts longer per combo point:\n   1 point: 25 damage over 8 secs\n   2 points: 36 damage over 10 secs\n   3 points: 50 damage over 12 secs\n   4 points: 66 damage over 14 secs\n   5 points: 87 damage over 16 secs", "50 over 12s, 6 ticks", 3),
 ]
 
+# Tooltips over 999 damage carry a thousands separator ("1,002"). The parser used to start after the comma
+# and read 2 (CurseForge reports: rank 6 Shadow Word: Pain and Bane of Agony). Checked exactly, not just printed.
+THOUSANDS = [
+    ("Shadow Word: Pain", "A word of darkness that causes 1,002 Shadow damage over 18 sec.", None,
+     "1002 dmg, school 32, 18s, every 3s -> 6 ticks of 167.0"),
+    ("Bane of Agony", "Banes the target with agony, causing 1,356 Shadow damage over 24 sec.  This damage is dealt "
+     "slowly at first, and builds up as the Bane reaches its full duration.", None,
+     "1356 dmg, school 32, 24s, every 2s -> 12 ticks of 113.0"),
+    ("Immolate", "Burns the enemy for 1,240 Fire damage and then an additional 2,050 Fire damage over 15 sec.", None,
+     "2050 dmg, school 4, 15s, every 3s -> 5 ticks of 410.0"),
+    ("Siphon Life", "Transfers 1,005 health from the target to the caster every 3 sec.  Lasts 30 sec.", None,
+     "10050 dmg, school 32, 30s, every 3s -> 10 ticks of 1005.0"),
+    ("Rip", "Finishing move that causes damage over time. Damage increases per combo point and by your Attack Power: "
+     "1 point : 843 damage over 12 sec. 2 points: 1,096 damage over 12 sec. 5 points: 1,855 damage over 12 sec.", 5,
+     "1855 dmg, school 1, 12s, every 2s -> 6 ticks of 309.2"),
+    ("Corruption", "Corrupts the target, causing 1,234,567 Shadow damage over 18 sec.", None,
+     "1234567 dmg, school 32, 18s, every 3s -> 6 ticks of 205761.2"),
+    # Not separators: a decimal duration and a list of small numbers stay as they were.
+    ("Corruption", "Corrupts the target, causing 40 Shadow damage over 12 sec.", None,
+     "40 dmg, school 32, 12s, every 3s -> 4 ticks of 10.0"),
+    ("Shadow Word: Pain", "Hits 3,4 or 5 enemies and causes 30 Shadow damage over 18 sec.", None,
+     "30 dmg, school 32, 18s, every 3s -> 6 ticks of 5.0"),
+]
+
 if __name__ == "__main__":  # tools/test_spellbook.py imports `track` from here
     width = max(len(c[1]) for c in CASES)
     for case in CASES:
@@ -97,3 +121,12 @@ if __name__ == "__main__":  # tools/test_spellbook.py imports `track` from here
         combo_points = case[4] if len(case) > 4 else None  # finishers only
         spell = label.split(" (")[0]  # labels may carry a note, e.g. "Rip (5 pts)"
         print(f"{cls:8} {label:<{width}}  {track(spell, desc, combo_points):<55}  expect: {expect}")
+    failed = 0
+    for spell, desc, combo_points, want in THOUSANDS:
+        got = track(spell, desc, combo_points)
+        if got != want:
+            failed += 1
+            print(f"FAIL  thousands {spell}: {got}, expected {want}")
+    print(f"thousands separators: {len(THOUSANDS) - failed} passed, {failed} failed")
+    if failed:
+        raise SystemExit(1)

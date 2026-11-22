@@ -1,5 +1,9 @@
 # DoesItDie
 
+## Unreleased
+
+- **Spells that deal over 999 damage are read correctly.** Tooltips like "1,002 Shadow damage" were read as 2 damage, so the marker for high ranks (Shadow Word: Pain and Bane of Agony rank 6, among others) was only a sliver. Thanks to pazzypaz, octy and everyone who reported it on CurseForge.
+
 ## v0.9.4
 
 - **Rip and Rupture no longer vanish when an auto-attack misses at the same moment.** A miss right after a finisher was always taken as the finisher missing. Now the addon checks your combo points: if they were spent, the finisher landed and its marker stays.
