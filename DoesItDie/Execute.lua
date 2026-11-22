@@ -1,5 +1,5 @@
 -- DoesItDie execute kill icon: the player's execute ability (Execute, Hammer of Wrath, Shadow Word: Death,
--- Shadowburn) shown by the target frame when its hit would kill the target.
+-- Shadowburn) or finisher (Ferocious Bite, Eviscerate) shown by the target frame when its hit would kill the target.
 --
 -- Target health is secret, so this uses the kill icon's trick (Display.lua): a very long invisible StatusBar
 -- with max = the target's health and value = the ability's estimated hit, inside a small clipping frame. The
@@ -11,6 +11,11 @@
 --    it, compared with the tooltip's average. Crits are taken out with the crit chance (readable out of combat);
 --    misses stay in, which only lowers the ratio.
 --  * Execute adds its "each extra point of rage" damage when rage is readable (UnitPower); if not, the base.
+--    Ferocious Bite the same with energy.
+--  * Finishers take the row of their per-point table for the current combo points (ns.currentComboPoints: read,
+--    else DoesItDie.lua's count; unknown = 1 point). Extra points from crits (Primal Fury, Seal Fate) aren't
+--    counted, so it errs low. Learning only takes casts whose points were read, not counted: an undercount
+--    would learn a ratio that's too high.
 -- C_Spell.IsSpellUsable, when readable, hides it while the ability can't be cast (Execute and Hammer of Wrath
 -- above 20%, not enough rage). Unverified in-game.
 
@@ -23,13 +28,18 @@ local LEARN_RATIO_MIN, LEARN_RATIO_MAX = 0.5, 3 -- a meter total outside this vs
 local LEARN_WEIGHT_CAP = 10 -- older fights count as at most this many casts, so gear changes catch up
 local METER_TRIES, METER_RETRY_SECONDS = 20, 0.5
 local SPELL_CRIT_MULTIPLIER, MELEE_CRIT_MULTIPLIER = 1.5, 2
-local RAGE = 1 -- Enum.PowerType.Rage
-local DEFAULT_RAGE_COST = 15
+local RAGE, ENERGY = 1, 3 -- Enum.PowerType
+local POWER_NAMES = { [RAGE] = "rage", [ENERGY] = "energy" }
 
 -- Per class: the English name and Classic Era spell IDs, highest rank first (Shadow Word: Death is Forever's
--- own; its IDs are unknown, so it's found by name). school: the GetSpellCritChance school index.
+-- own; its IDs are unknown, so it's found by name). school: the GetSpellCritChance school index; power: the extra
+-- rage/energy its tooltip converts into damage, with its usual cost; finisher: damage per combo point.
 local EXECUTES = {
-    WARRIOR = { name = "Execute", ids = { 20662, 20661, 20660, 20658, 5308 }, melee = true, rage = true },
+    WARRIOR = { name = "Execute", ids = { 20662, 20661, 20660, 20658, 5308 }, melee = true, power = RAGE, cost = 15 },
+    DRUID = { name = "Ferocious Bite", ids = { 31018, 22829, 22828, 22827, 22568 }, melee = true, finisher = true,
+        power = ENERGY, cost = 35 },
+    ROGUE = { name = "Eviscerate", ids = { 31016, 11300, 11299, 8624, 8623, 6762, 6761, 6760, 2098 }, melee = true,
+        finisher = true },
     PALADIN = { name = "Hammer of Wrath", ids = { 24239, 24274, 24275 }, school = 2 },
     PRIEST = { name = "Shadow Word: Death", ids = {}, school = 6 },
     WARLOCK = { name = "Shadowburn", ids = { 18871, 18870, 18869, 18868, 18867, 17877 }, school = 6 },
@@ -92,13 +102,25 @@ local function updateAbility()
     ns.trace(string.format("EXEC watching %s (%d)", ability.name, id))
 end
 
--- A tooltip's hit: low end, high end, damage per extra rage point (Execute). English first; in other languages
--- the first number (percentages left out) is the low end and a number right after it the high end.
-local function parseHit(desc)
+-- A tooltip's hit: low end, high end, damage per extra rage/energy point (Execute, Ferocious Bite). Finishers
+-- ("1 point : 122-162 damage" ... "5 points: 490-530 damage") take the row for `points` (clamped to the table;
+-- nil = 1). English first; in other languages the first number (percentages left out) is the low end and a
+-- number right after it the high end.
+local function parseHit(desc, points)
     if type(desc) ~= "string" or isSecret(desc) then return nil end
+    local perPower = desc:match("each extra point of %a+ into (%d+%.?%d*)")
+    local rows, highest = {}, 0
+    for n, rowLow, rowHigh in desc:gmatch("(%d+)[^%d\n]-:%s*(%d+)%s*%-%s*(%d+)") do
+        n = tonumber(n)
+        rows[n] = { tonumber(rowLow), tonumber(rowHigh) }
+        highest = math.max(highest, n)
+    end
+    if highest > 0 then
+        local row = rows[math.max(1, math.min(points or 1, highest))] or rows[1] or rows[highest]
+        return row[1], row[2], tonumber(perPower) or 0
+    end
     local low, high = desc:match("(%d+) to (%d+)")
     if not low then low = desc:match("(%d+) damage") end
-    local perRage = desc:match("each extra point of rage into (%d+)")
     if not low then
         local plain = desc:gsub("%d+%s*%%", "")
         low, high = plain:match("(%d+)[^%d]-(%d+)")
@@ -109,25 +131,33 @@ local function parseHit(desc)
     end
     low = tonumber(low)
     if not low then return nil end
-    return low, tonumber(high) or low, tonumber(perRage) or 0
+    return low, tonumber(high) or low, tonumber(perPower) or 0
 end
 
-local function hitOf(spellID)
-    return parseHit(readable("string", C_Spell and C_Spell.GetSpellDescription, spellID))
+local function hitOf(spellID, points)
+    return parseHit(readable("string", C_Spell and C_Spell.GetSpellDescription, spellID), points)
 end
 
--- Extra rage beyond Execute's cost, or nil when rage can't be read.
-local function extraRage(spellID)
-    local rage = readable("number", UnitPower, "player", RAGE)
-    if not rage then return nil end
-    local cost = DEFAULT_RAGE_COST
+-- Rage/energy beyond the ability's cost, or nil when it can't be read.
+local function extraPower(spellID, info)
+    if not info.power then return 0 end
+    local power = readable("number", UnitPower, "player", info.power)
+    if not power then return nil end
+    local cost = info.cost or 0
     local costs = C_Spell and readable("table", C_Spell.GetSpellPowerCost, spellID)
     for _, c in ipairs(costs or {}) do
-        if not isSecret(c.type) and c.type == RAGE and not isSecret(c.cost) and type(c.cost) == "number" then
+        if not isSecret(c.type) and c.type == info.power and not isSecret(c.cost) and type(c.cost) == "number" then
             cost = c.cost
         end
     end
-    return math.max(0, rage - cost)
+    return math.max(0, power - cost)
+end
+
+-- A finisher's combo points now: the number and whether it was read (not counted or assumed).
+local function comboPoints()
+    local points, source = ns.currentComboPoints()
+    if not points then return 1, false end
+    return points, source == "read"
 end
 
 local function learnedRatio(spellID)
@@ -138,13 +168,20 @@ end
 -- The hit to compare with the target's health, and how it was made (for the log), or nil.
 local function estimate()
     if not ability then return nil end
-    local low, _, perRage = hitOf(ability.spellID)
+    local info, points = ability.info, nil
+    if info.finisher then
+        points = comboPoints()
+        if points <= 0 then return nil end -- read as none: nothing to finish with
+    end
+    local low, _, perPower = hitOf(ability.spellID, points)
     if not low then return nil end
-    local extra = perRage > 0 and extraRage(ability.spellID) or 0
+    local extra = perPower > 0 and extraPower(ability.spellID, info) or 0
     local ratio = learnedRatio(ability.spellID)
-    local hit = (low + perRage * (extra or 0)) * ratio
-    return hit, string.format("%s: %d%s x %.2f learned = %d", ability.name, low,
-        perRage > 0 and string.format(" + %d rage x %d", extra or 0, perRage) or "", ratio, hit)
+    local hit = (low + perPower * (extra or 0)) * ratio
+    return hit, string.format("%s: %s%d%s x %.2f learned = %d", ability.name,
+        points and string.format("%d point(s) ", points) or "", low,
+        perPower > 0 and string.format(" + %d %s x %g", extra or 0, POWER_NAMES[info.power] or "power", perPower)
+        or "", ratio, hit)
 end
 
 ---------------------------------------------------------------------------
@@ -153,27 +190,36 @@ end
 
 -- This combat: spellID -> { casts, expected (the tooltip's average hit, summed per cast), unclear }
 local tally = {}
-local rageAtSend = {} -- castGUID -> extra rage when the cast was sent (spent by the time it succeeds)
+-- castGUID -> { extra (rage/energy beyond the cost, false if unreadable), points, pointsRead } when the cast was
+-- sent: both are spent by the time it succeeds.
+local atSend = {}
 
 local function onCastSent(castGUID, spellID)
-    if not ability or spellID ~= ability.spellID or not ability.info.rage then return end
-    if castGUID and not isSecret(castGUID) then rageAtSend[castGUID] = extraRage(spellID) or false end
+    if not ability or isSecret(spellID) or spellID ~= ability.spellID then return end
+    if not castGUID or isSecret(castGUID) then return end
+    local sent = { extra = extraPower(spellID, ability.info) or false }
+    if ability.info.finisher then sent.points, sent.pointsRead = comboPoints() end
+    atSend[castGUID] = sent
 end
 
 local function onCastSucceeded(castGUID, spellID)
     if not ability or isSecret(spellID) or spellID ~= ability.spellID then return end
-    local low, high, perRage = hitOf(spellID)
+    local sent = castGUID and not isSecret(castGUID) and atSend[castGUID]
+    if sent then atSend[castGUID] = nil end
+    local finisher = ability.info.finisher
+    local low, high, perPower = hitOf(spellID, sent and sent.points)
     if not low then return end
     local t = tally[spellID] or { casts = 0, expected = 0 }
     tally[spellID] = t
-    local extra = 0
-    if perRage > 0 then
-        extra = castGUID and not isSecret(castGUID) and rageAtSend[castGUID]
-        if castGUID and not isSecret(castGUID) then rageAtSend[castGUID] = nil end
-        if not extra then t.unclear = true end -- the meter's total has rage in it that wasn't counted
-    end
     t.casts = t.casts + 1
-    t.expected = t.expected + (low + high) / 2 + perRage * (extra or 0)
+    local extra = sent and sent.extra
+    -- The meter's total would have damage in it this cast's expected hit doesn't.
+    if perPower > 0 and not extra then
+        t.unclear = POWER_NAMES[ability.info.power] .. " wasn't readable at a cast"
+    elseif finisher and not (sent and sent.pointsRead) then
+        t.unclear = "combo points weren't readable at a cast (counted ones can be too few)"
+    end
+    t.expected = t.expected + (low + high) / 2 + perPower * (extra or 0)
 end
 
 -- How much crits add to an average hit: 1 + chance x (multiplier - 1). Read out of combat (after it).
@@ -203,7 +249,7 @@ local function learn(spells, counted)
         local name = readable("string", C_Spell and C_Spell.GetSpellName, spellID) or tostring(spellID)
         local total = totals[spellID]
         if t.unclear then
-            ns.trace(string.format("EXEC LEARN %s skipped: rage wasn't readable at a cast", name))
+            ns.trace(string.format("EXEC LEARN %s skipped: %s", name, t.unclear))
         elseif not total or total <= 0 then
             ns.trace(string.format("EXEC LEARN %s skipped: no damage meter total (%d cast(s), all missed?)", name,
                 t.casts))
@@ -296,7 +342,7 @@ local function targetDead()
     return dead == true
 end
 
--- false only when the game plainly says it can't be cast now (Execute above 20%, no rage); unknown counts as usable.
+-- false only when the game plainly says it can't be cast now (Execute above 20%, no rage, no combo points); unknown counts as usable.
 local function usable()
     if not (C_Spell and C_Spell.IsSpellUsable) then return true end
     return readable("boolean", C_Spell.IsSpellUsable, ability.spellID) ~= false
@@ -351,7 +397,7 @@ events:SetScript("OnEvent", function(self, event, ...)
         onCastSucceeded(castGUID, spellID)
     elseif event == "PLAYER_REGEN_ENABLED" then
         local counted = tally
-        tally, rageAtSend = {}, {}
+        tally, atSend = {}, {}
         if next(counted) == nil then return end
         C_Timer.After(METER_RETRY_SECONDS, function() learnAfterCombat(counted, METER_TRIES) end)
     end
@@ -379,7 +425,7 @@ function ns.executeCommand()
     db = ns.db
     updateAbility()
     if not ability then
-        ns.print(T("No execute ability found (Execute, Hammer of Wrath, Shadow Word: Death or Shadowburn)."))
+        ns.print(T("No execute ability found (Execute, Hammer of Wrath, Shadow Word: Death, Shadowburn, Ferocious Bite or Eviscerate)."))
         return
     end
     local hit, how = estimate()

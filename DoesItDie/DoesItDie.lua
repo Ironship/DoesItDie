@@ -772,6 +772,17 @@ local function resetComboCount()
     lastComboPoints, lastComboAt = nil, 0
 end
 
+-- The combo points right now, for Execute.lua's finisher icon: points and "read" (an API or Blizzard's display),
+-- "counted" or nil and "unknown". A readable 0 from the APIs is a real 0; a count beats a 0 from the display only.
+function ns.currentComboPoints()
+    local points = readComboPoints()
+    if points and points > 0 then return points, "read" end
+    if lastComboPoints and GetTime() - lastComboAt <= COMBO_CACHE_SECONDS then return lastComboPoints, "read" end
+    if countedPoints > 0 then return countedPoints, "counted" end
+    if points then return points, "read" end
+    return nil, "unknown"
+end
+
 -- Returns points and where they came from, or nil and "unknown".
 local function comboPointsForCast()
     local points, source = comboAtSend, "read"

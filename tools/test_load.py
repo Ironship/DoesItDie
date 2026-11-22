@@ -551,6 +551,51 @@ G.DoesItDieDB.execShow = False
 step("switched off", lambda: H.update(0.2))
 check("  hidden", G.DoesItDieExecute.shown, False)
 G.DoesItDieDB.execShow = True
+
+# Finishers: Ferocious Bite's row for the current combo points, plus extra energy.
+BITE = ("Finishing move that causes damage per combo point and converts each extra point of energy into 2.0 "
+        "additional damage. Damage is increased by your Attack Power.\n1 point : 122-162 damage\n2 points: 214-254 "
+        "damage\n3 points: 306-346 damage\n4 points: 398-438 damage\n5 points: 490-530 damage")
+check("Ferocious Bite at 3 points", list(ex.parseHit(BITE, 3)), [306, 346, 2])
+check("  at 7 points: the top row", list(ex.parseHit(BITE, 7)), [490, 530, 2])
+check("  points unknown: the first row", list(ex.parseHit(BITE)), [122, 162, 2])
+lua.execute("""
+    playerClass = "DRUID"
+    function IsPlayerSpell(id) return id == 22828 end
+    local name, desc = C_Spell.GetSpellName, C_Spell.GetSpellDescription
+    C_Spell.GetSpellName = function(id) if id == 22828 then return "Ferocious Bite" end return name(id) end
+    C_Spell.GetSpellDescription = function(id) if id == 22828 then return biteText end return desc(id) end
+    energy, comboPoints = 75, 4
+    function UnitPower(unit, kind) if kind == 3 then return energy end end
+    function GetComboPoints() return comboPoints end
+""")
+G.biteText = BITE
+step("now a druid", lambda: (H.fire("SPELLS_CHANGED"), H.update(0.2)))
+check("  watching Ferocious Bite", any("watching Ferocious Bite (22828)" in l for l in exec_log()), True)
+check("  4 points, 40 extra energy: 398 + 80", estimate(), 478)
+G.comboPoints = 0
+check("  no combo points: no estimate", estimate(), None)
+lua.execute("GetComboPoints = function() return nil end")
+check("  points unreadable, none counted: 1 point's row", estimate(), 122 + 80)
+
+
+def bite_fight(points_readable):
+    G.combat = True
+    if points_readable:
+        lua.execute("GetComboPoints = function() return 5 end")
+    H.fire("UNIT_SPELLCAST_SENT", "player", "", "fb-1", 22828)
+    H.fire("UNIT_SPELLCAST_SUCCEEDED", "player", "fb-1", 22828)
+    G.combat = False
+    return ex.learn(lua.table_from([lua.table_from({"spellID": 22828, "totalAmount": 700})]), ex.takeTally())
+
+
+check("Bite without readable combo points isn't learned", bite_fight(False), 0)
+check("  log says why", any("combo points weren't readable" in l for l in exec_log()), True)
+# 5 points read, 40 extra energy: 510 + 80 = 590 expected; 700 with 20% crits at 2x is 583.3 a hit.
+check("Bite with readable points learns", bite_fight(True), 1)
+check("  ratio", G.DoesItDieDB.execRatios[22828].ratio, round(700 / 1.2 / 590, 3))
+lua.execute("GetComboPoints = nil")
+
 lua.execute("function UnitHealth() return 100 end; playerClass = 'MAGE'")
 step("back to a mage", lambda: (H.fire("SPELLS_CHANGED"), H.update(0.2)))
 check("  nothing watched, hidden", G.DoesItDieExecute.shown, False)
