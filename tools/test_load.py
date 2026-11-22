@@ -907,6 +907,51 @@ check("  marker moves to its bar", same(G.DoesItDieRemaining.allPoints, G.BBFMir
 lua.execute("BBF.HealthBar = function() error('broken') end")
 step("a BBF that throws", lambda: H.update(1.2))
 check("  falls back to Blizzard's bar", same(G.DoesItDieRemaining.allPoints, G.TargetFrameHealthBar), True)
+# Issue #36: the layering walk over the target frame's tree ran every second even with nothing to show, over
+# however many frames other addons had hung there. Now it only runs while the marker shows, and stops at 300.
+lua.execute("""
+    layerVisits = 0
+    local function leaf()
+        return { GetFrameStrata = function() layerVisits = layerVisits + 1; return "LOW" end,
+                 GetFrameLevel = function() return 1 end, GetChildren = function() end }
+    end
+    local crowd = {}
+    for i = 1, 50 do
+        local kids = {}
+        for j = 1, 50 do kids[j] = leaf() end
+        local node = leaf()
+        node.GetChildren = function() return unpack(kids) end
+        crowd[i] = node
+    end
+    TargetFrame.GetChildren = function() return unpack(crowd) end
+""")
+
+
+def no_target_for_a_while():
+    G.targetGuid = None
+    H.fire("PLAYER_TARGET_CHANGED")
+    H.update(1.2)
+    H.update(1.2)
+
+
+step("2,500 frames under the target frame, no target", no_target_for_a_while)
+check("  no layering walk while nothing shows", G.layerVisits, 0)
+
+
+def dot_with_crowded_frame():
+    G.targetGuid = "Creature-0-1-2-3-3099-000001"
+    H.fire("PLAYER_TARGET_CHANGED")
+    H.fire("UNIT_SPELLCAST_SUCCEEDED", "player", "cast-L1", 172)
+    H.update(1.2)
+
+
+step("Corruption on a target with that frame", dot_with_crowded_frame)
+check("  walked", G.layerVisits > 0, True)
+step("one more layer check", lambda: (lua.execute("layerVisits = 0"), H.update(1.2)))
+check("  stopped at 300 frames", 0 < G.layerVisits <= 300, True)
+check("  logged once as slow",
+      sum("SLOW layer check" in line for line in G.DoesItDieDB.log.values()), 1)
+G.targetGuid = None
 lua.execute("BBF, TargetFrame, TargetFrameHealthBar, BBFMirrorBar, BBFMirrorOn = nil, nil, nil, nil, nil")
 step("no BetterBlizzFrames, no target frame again", lambda: (H.fire("PLAYER_TARGET_CHANGED"), H.update(1.2)))
 
@@ -1269,8 +1314,22 @@ lua.execute("""
     targetGuid = nil
 """)
 step("attach to a unit frame below a shared UI root", lambda: ns.display.attach(True))
-step("ten idle layer checks on a custom unit frame", lambda: [H.update(1.1) for _ in range(10)])
-check("  visits only target, health and portrait on each check", G.layerVisits, 30)
+step("ten idle seconds on a custom unit frame", lambda: [H.update(1.1) for _ in range(10)])
+check("  no layer checks while nothing shows (issue #36)", G.layerVisits, 0)
+
+
+def dot_and_settle():
+    G.targetGuid = "Creature-0-1-2-3-3099-000001"
+    H.fire("PLAYER_TARGET_CHANGED")
+    H.fire("UNIT_SPELLCAST_SUCCEEDED", "player", "cast-E1", 172)
+    H.update(1.1)
+    lua.execute("layerVisits = 0")
+
+
+step("Corruption on the target", dot_and_settle)
+# Three, not ten: the Corruption never ticks here, so it's dropped as resisted after two missed ticks.
+step("three layer checks while it shows", lambda: [H.update(1.1) for _ in range(3)])
+check("  visits only target, health and portrait on each check", G.layerVisits, 9)
 check("  marker above target portrait, not unrelated UI", G.DoesItDieRemaining.level, 41)
 check("  picker still finds the top-level UI root", same(ns.frameRoot(G.ElvUF_Target.Health), G.ElvUIParent), True)
 check("  unit-less replacement keeps its previous root", same(ns.frameRoot(custom_bar, "target"), G.MyTargetFrame), True)
