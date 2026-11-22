@@ -378,6 +378,108 @@ local function update()
     window:SetShown(ok)
 end
 
+---------------------------------------------------------------------------
+-- The icon on enemy nameplates
+---------------------------------------------------------------------------
+
+-- Per plate host (Blizzard's plate, or EllesmereUI's pooled frame): the same clipped window, long bar and icon,
+-- right of the plate's health bar (Nameplates.lua's findHealthBar), with max = that mob's health. Finishers only
+-- on the target's plate (found by frame, which works in dungeons where UnitIsUnit is secret): combo points are the
+-- target's. Execute's 20% rule can't be checked for other mobs; health <= the hit is far below 20% on most mobs.
+local MAX_PLATES = 40
+local PLATE_LEVEL_ABOVE, FALLBACK_LEVEL = 22, 200
+local plateIcons = {} -- host -> { window, bar, icon, healthBar, size, texture }
+local shownHosts = {}
+
+local function plateIconFor(host, healthBar, pooled, matchStrata)
+    local p = plateIcons[host]
+    if not p then
+        p = { window = CreateFrame("Frame", nil, host) }
+        p.window:SetClipsChildren(true)
+        p.bar = CreateFrame("StatusBar", nil, p.window)
+        p.bar:SetPoint("RIGHT", p.window, "RIGHT")
+        p.bar:SetStatusBarTexture("Interface\\Buttons\\WHITE8X8")
+        p.bar:SetStatusBarColor(0, 0, 0, 0)
+        p.icon = p.bar:CreateTexture(nil, "OVERLAY")
+        p.icon:SetPoint("RIGHT", p.bar:GetStatusBarTexture(), "RIGHT")
+        if pooled then host:HookScript("OnHide", function() p.window:Hide() end) end
+        plateIcons[host] = p
+    end
+    if p.healthBar ~= healthBar then
+        p.healthBar, p.size = healthBar, nil
+        if matchStrata then
+            local strata = readable("string", healthBar.GetFrameStrata, healthBar)
+            if strata then
+                p.window:SetFrameStrata(strata)
+                p.bar:SetFrameStrata(strata)
+            end
+        end
+        local level = readable("number", healthBar.GetFrameLevel, healthBar) or FALLBACK_LEVEL
+        p.window:SetFrameLevel(level + PLATE_LEVEL_ABOVE)
+        p.bar:SetFrameLevel(level + PLATE_LEVEL_ABOVE + 1)
+    end
+    local size = db.execPlateSize
+    if p.size ~= size or p.texture ~= ability.icon then
+        p.size, p.texture = size, ability.icon
+        p.window:SetSize(size, size)
+        p.bar:SetSize(BAR_LENGTH, size)
+        p.icon:SetSize(size, size)
+        p.icon:SetTexture(ability.icon)
+        p.window:ClearAllPoints()
+        p.window:SetPoint("LEFT", healthBar, "RIGHT", 4, 0)
+    end
+    return p
+end
+
+-- health: the mob's (secret) health, or 1 with hit 1 to show it outright (preview, /did exec).
+local function drawPlateIcon(host, healthBar, pooled, matchStrata, health, hit)
+    local p = plateIconFor(host, healthBar, pooled, matchStrata)
+    local ok = pcall(function()
+        p.bar:SetMinMaxValues(0, health)
+        p.bar:SetValue(hit)
+    end)
+    p.window:SetShown(ok)
+    shownHosts[host] = ok or nil
+end
+
+local function updatePlate(unit, plate, targetPlate, testing)
+    if readable("boolean", UnitIsDead, unit) == true then return end
+    if readable("boolean", UnitCanAttack, "player", unit) == false then return end
+    local isTarget = targetPlate ~= nil and plate == targetPlate
+    if ability.info.finisher and not isTarget then return end
+    local healthBar, host, _, addonBar = ns.plateHealthBar(plate, unit)
+    if not healthBar then return end
+    if testing then return drawPlateIcon(host, healthBar, host ~= plate, addonBar, 1, 1) end
+    local hit = estimate()
+    if not hit or (isTarget and not usable()) then return end
+    drawPlateIcon(host, healthBar, host ~= plate, addonBar, UnitHealth(unit), hit)
+end
+
+local function updatePlates()
+    local previousHosts = shownHosts
+    shownHosts = {}
+    if db.execShow and db.execPlates and ability and ns.plateHealthBar then
+        local preview = ns.platePreview and ns.platePreview()
+        if preview then drawPlateIcon(preview.plate, preview.healthBar, false, false, 1, 1) end
+        if C_NamePlate and C_NamePlate.GetNamePlateForUnit and db.nameplateMode ~= "off" then
+            local testing = testUntil and GetTime() < testUntil
+            local okTarget, targetPlate = pcall(C_NamePlate.GetNamePlateForUnit, "target")
+            if not okTarget then targetPlate = nil end
+            for i = 1, MAX_PLATES do
+                local unit = "nameplate" .. i
+                if UnitExists(unit) then
+                    local ok, plate = pcall(C_NamePlate.GetNamePlateForUnit, unit)
+                    local forbidden = ok and plate and plate.IsForbidden and plate:IsForbidden()
+                    if ok and plate and not forbidden then updatePlate(unit, plate, targetPlate, testing) end
+                end
+            end
+        end
+    end
+    for host in pairs(previousHosts) do
+        if not shownHosts[host] then plateIcons[host].window:Hide() end
+    end
+end
+
 local events = CreateFrame("Frame")
 events:RegisterEvent("PLAYER_LOGIN")
 events:RegisterEvent("SPELLS_CHANGED")
@@ -411,6 +513,7 @@ events:SetScript("OnUpdate", function(self, elapsed)
     db = ns.db
     if not db then return end
     local ok, err = pcall(update)
+    if ok then ok, err = pcall(updatePlates) end
     if not ok then
         window:Hide()
         if err ~= lastTraced then
@@ -440,5 +543,5 @@ function ns.forgetExecuteLearning()
 end
 
 -- For tests.
-ns.execute = { parseHit = parseHit, learn = learn, estimate = estimate, updateAbility = updateAbility,
+ns.execute = { plateIcons = plateIcons, parseHit = parseHit, learn = learn, estimate = estimate, updateAbility = updateAbility,
     takeTally = function() local t = tally; tally = {}; return t end }

@@ -486,7 +486,7 @@ lua.execute("""
     C_Spell.GetSpellDescription = function(id) return spells[id] and spells[id][2] or desc(id) end
     C_Spell.GetSpellTexture = function(id) return 135000 + id end
     targetHealth = 1000
-    function UnitHealth(unit) if unit == "target" then return targetHealth end return 100 end
+    function UnitHealth(unit) if unit == "target" or unit == "nameplate1" then return targetHealth end return 100 end
 """)
 step("spells loaded as a paladin", lambda: (H.fire("SPELLS_CHANGED"), H.update(0.2)))
 check("  watching Hammer of Wrath", any("watching Hammer of Wrath (24239)" in l for l in exec_log()), True)
@@ -496,6 +496,23 @@ G.targetHealth = 400
 step("target at 400 health", lambda: H.update(0.2))
 check("  bar full: the icon shows", (exec_bar().max, exec_bar().value), (400, 400))
 check("  window shown", G.DoesItDieExecute.shown, True)
+
+
+def plate_exec_icon():
+    icons = list(ns.execute.plateIcons.values())
+    return icons[0] if icons else None
+
+
+check("  and on the mob's nameplate", plate_exec_icon().window.shown if plate_exec_icon() else None, True)
+check("  its bar: the plate mob's health vs the hit", (plate_exec_icon().bar.max, plate_exec_icon().bar.value),
+      (400, 400))
+G.DoesItDieDB.execPlates = False
+step("nameplate execute icon switched off", lambda: H.update(0.2))
+check("  plate icon hidden", plate_exec_icon().window.shown, False)
+check("  target's still shown", G.DoesItDieExecute.shown, True)
+G.DoesItDieDB.execPlates = True
+step("  back on", lambda: H.update(0.2))
+check("  plate icon shown again", plate_exec_icon().window.shown, True)
 lua.execute("C_Spell.IsSpellUsable = function() return false end")
 step("the game says it can't be cast", lambda: H.update(0.2))
 check("  hidden", G.DoesItDieExecute.shown, False)
@@ -573,6 +590,21 @@ G.biteText = BITE
 step("now a druid", lambda: (H.fire("SPELLS_CHANGED"), H.update(0.2)))
 check("  watching Ferocious Bite", any("watching Ferocious Bite (22828)" in l for l in exec_log()), True)
 check("  4 points, 40 extra energy: 398 + 80", estimate(), 478)
+G.targetHealth = 400
+step("finisher: the plate isn't the target's", lambda: H.update(0.2))
+check("  no finisher icon on another mob's plate", plate_exec_icon().window.shown, False)
+check("  but on the target frame", G.DoesItDieExecute.shown, True)
+lua.execute("""
+    local getPlate = C_NamePlate.GetNamePlateForUnit
+    C_NamePlate.GetNamePlateForUnit = function(unit) return getPlate(unit == "target" and "nameplate1" or unit) end
+""")
+step("  the plate is the target's", lambda: H.update(0.2))
+check("  finisher icon on it", plate_exec_icon().window.shown, True)
+lua.execute("""
+    local getPlate = C_NamePlate.GetNamePlateForUnit
+    C_NamePlate.GetNamePlateForUnit = function(unit) if unit ~= "target" then return getPlate(unit) end end
+""")
+G.targetHealth = 1000
 G.comboPoints = 0
 check("  no combo points: no estimate", estimate(), None)
 lua.execute("GetComboPoints = function() return nil end")
@@ -618,7 +650,9 @@ markers = plate_children("StatusBar")
 check("  nameplate got a marker", len(markers), 1)
 check("  marker filled to Corruption's 40", markers[0].value if markers else None, 40)
 check("  marker shown", markers[0].shown if markers else None, True)
-icon_windows = [f for f in plate_children("Frame") if f.clips]  # the clipped kill icon window
+# the clipped kill icon window (not the execute icon's, which the paladin and druid steps above left on the plate)
+icon_windows = [f for f in plate_children("Frame") if f.clips
+                and not any(same(f, p.window) for p in ns.execute.plateIcons.values())]
 check("  kill icon window shown", icon_windows[0].shown if icon_windows else None, True)
 
 
