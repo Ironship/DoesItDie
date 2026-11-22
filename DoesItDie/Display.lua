@@ -1006,6 +1006,9 @@ ns.display = {
     -- The target changed: its damage is traced again from the start.
     forgetTracedDamage = function() lastTracedDamage = nil end,
     hasHealthBar = function() return healthBar ~= nil end,
+    -- For Execute.lua: what the kill icon is centered on, the frame whose visibility the display follows, and
+    -- whether that's the options window's mock target frame.
+    killIconAnchor = function() return skullAnchor, visibilityFrame, previewHost ~= nil end,
     -- /did skull: show the kill icon for `seconds`, and log where it is.
     testSkull = function(seconds)
         skullTestUntil = GetTime() + seconds
