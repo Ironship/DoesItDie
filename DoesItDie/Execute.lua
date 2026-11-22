@@ -1,28 +1,51 @@
--- DoesItDie execute range: the probe (/did exec) for showing when the target is below a health percentage
--- (Execute and Hammer of Wrath: 20%). Target health is secret, so two ways are tested side by side:
+-- DoesItDie execute kill icon: the player's execute ability (Execute, Hammer of Wrath, Shadow Word: Death,
+-- Shadowburn) or finisher (Ferocious Bite, Eviscerate) shown by the target frame when its hit would kill the target.
 --
---  A. Geometry, like the kill icon: a very long invisible StatusBar with max = max health and value = health.
---     A clipping frame covers only its empty part (from the fill's end to the bar's end), and the icon sits at
---     the threshold's position on the bar, inside that frame, so it's visible only when the fill ends before
---     it: health < threshold. Works if a frame anchored to a secret-sized texture still clips correctly.
---  B. Midnight's UnitHealthPercent with a step color curve (opaque below the threshold, transparent above),
---     applied to the icon's color. Only if Forever has these APIs; the probe logs what exists.
---  C. Not execute: a test of the kill icon done with a curve instead of the clipped-StatusBar trick. A step
---     curve in raw health (opaque up to the remaining DoT damage, transparent above) is evaluated with the
---     secret UnitHealth("target") and the result goes to SetAlpha (float curve) or, failing that, to
---     SetVertexColor (color curve). Should light up exactly when the real kill icon on the portrait does.
+-- Target health is secret, so this uses the kill icon's trick (Display.lua): a very long invisible StatusBar
+-- with max = the target's health and value = the ability's estimated hit, inside a small clipping frame. The
+-- ability's icon rides the end of the fill and only shows when the fill reaches the end: hit >= health.
 --
--- The icons show above the target frame until /did exec is typed again. Compare A and B with the target's
--- health as it drops past the threshold, and C with the real kill icon.
+-- The hit is estimated low on purpose (a missing icon costs a GCD; a false one gets you killed):
+--  * the tooltip's low end ("474 to 522" -> 474), which leaves out spell/attack power, times
+--  * a ratio learned from the damage meter after each combat: that spell's total over the casts that landed in
+--    it, compared with the tooltip's average. Crits are taken out with the crit chance (readable out of combat);
+--    misses stay in, which only lowers the ratio.
+--  * Execute adds its "each extra point of rage" damage when rage is readable (UnitPower); if not, the base.
+--    Ferocious Bite the same with energy.
+--  * Finishers take the row of their per-point table for the current combo points (ns.currentComboPoints: read,
+--    else DoesItDie.lua's count; unknown = 1 point). Extra points from crits (Primal Fury, Seal Fate) aren't
+--    counted, so it errs low. Learning only takes casts whose points were read, not counted: an undercount
+--    would learn a ratio that's too high.
+-- C_Spell.IsSpellUsable, when readable, hides it while the ability can't be cast (Execute and Hammer of Wrath
+-- above 20%, not enough rage). Unverified in-game.
 
 local ADDON_NAME, ns = ...
 
-local WHITE = "Interface\\Buttons\\WHITE8X8"
-local ICON = "Interface\\Icons\\INV_Sword_48"
-local BAR_LENGTH = 50000 -- icon A slides in over ICON_SIZE / BAR_LENGTH (~0.05%) of health at the threshold
-local ICON_SIZE = 24
+local T = ns.locale.T
+local BAR_LENGTH = 10000 -- the icon slides in over size / BAR_LENGTH of health short of lethal (0.3% at 32px)
 local UPDATE_INTERVAL = 0.1
-local DEFAULT_THRESHOLD = 20
+local LEARN_RATIO_MIN, LEARN_RATIO_MAX = 0.5, 3 -- a meter total outside this vs the tooltip: something got mixed in
+local LEARN_WEIGHT_CAP = 10 -- older fights count as at most this many casts, so gear changes catch up
+local METER_TRIES, METER_RETRY_SECONDS = 20, 0.5
+local SPELL_CRIT_MULTIPLIER, MELEE_CRIT_MULTIPLIER = 1.5, 2
+local RAGE, ENERGY = 1, 3 -- Enum.PowerType
+local POWER_NAMES = { [RAGE] = "rage", [ENERGY] = "energy" }
+
+-- Per class: the English name and Classic Era spell IDs, highest rank first (Shadow Word: Death is Forever's
+-- own; its IDs are unknown, so it's found by name). school: the GetSpellCritChance school index; power: the extra
+-- rage/energy its tooltip converts into damage, with its usual cost; finisher: damage per combo point.
+local EXECUTES = {
+    WARRIOR = { name = "Execute", ids = { 20662, 20661, 20660, 20658, 5308 }, melee = true, power = RAGE, cost = 15 },
+    DRUID = { name = "Ferocious Bite", ids = { 31018, 22829, 22828, 22827, 22568 }, melee = true, finisher = true,
+        power = ENERGY, cost = 35 },
+    ROGUE = { name = "Eviscerate", ids = { 31016, 11300, 11299, 8624, 8623, 6762, 6761, 6760, 2098 }, melee = true,
+        finisher = true },
+    PALADIN = { name = "Hammer of Wrath", ids = { 24239, 24274, 24275 }, school = 2 },
+    PRIEST = { name = "Shadow Word: Death", ids = {}, school = 6 },
+    WARLOCK = { name = "Shadowburn", ids = { 18871, 18870, 18869, 18868, 18867, 17877 }, school = 6 },
+}
+
+local db -- set on first use (ns.db is filled on ADDON_LOADED)
 
 local function isSecret(v)
     if type(issecretvalue) ~= "function" then return false end
@@ -30,308 +53,392 @@ local function isSecret(v)
     return ok and r or false
 end
 
--- "secret", "nil", "error: ...", or the value.
-local function describe(ok, value)
-    if not ok then return "error: " .. tostring(value) end
-    if value == nil then return "nil" end
-    if isSecret(value) then return "secret" end
-    return tostring(value)
-end
-
-local function call(fn, ...)
-    if type(fn) ~= "function" then return "missing" end
-    return describe(pcall(fn, ...))
-end
-
-local function keysOf(t)
-    if type(t) ~= "table" then return type(t) end
-    local keys = {}
-    for k in pairs(t) do table.insert(keys, tostring(k)) end
-    table.sort(keys)
-    return "{" .. table.concat(keys, ",") .. "}"
-end
-
-local function rectOf(region)
-    local ok, left, bottom, width, height = pcall(region.GetRect, region)
-    if not ok then return "error" end
-    if left == nil then return "no rect" end
-    if isSecret(left) or isSecret(width) then return "secret" end
-    return string.format("%.0f,%.0f %.0fx%.0f", left, bottom, width, height)
+-- A plain value from fn(...), or nil if it errors, is secret or isn't of type `kind`.
+local function readable(kind, fn, ...)
+    if type(fn) ~= "function" then return nil end
+    local ok, v = pcall(fn, ...)
+    if ok and not isSecret(v) and type(v) == kind then return v end
 end
 
 ---------------------------------------------------------------------------
--- Probe widgets
+-- The ability and its estimate
 ---------------------------------------------------------------------------
 
-local holder = CreateFrame("Frame", "DoesItDieExecuteProbe", UIParent)
-holder:SetSize(ICON_SIZE * 3 + 32, ICON_SIZE + 14)
-holder:SetFrameStrata("HIGH")
-holder:Hide()
+local ability -- { spellID, name, icon, info = EXECUTES entry } or nil (class has none, or not learned yet)
 
--- Hidden without a target; the holder keeps running the update.
-local content = CreateFrame("Frame", nil, holder)
-content:SetAllPoints()
-
-local function slot(point, label)
-    local frame = CreateFrame("Frame", nil, content)
-    frame:SetSize(ICON_SIZE, ICON_SIZE)
-    frame:SetPoint(point, content, point, 0, 7)
-    local back = frame:CreateTexture(nil, "BACKGROUND")
-    back:SetAllPoints()
-    back:SetColorTexture(0, 0, 0, 0.35) -- shows where the icon would be
-    local text = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    text:SetPoint("TOP", frame, "BOTTOM", 0, -1)
-    text:SetText(label)
-    return frame
+local function knows(spellID)
+    if type(IsPlayerSpell) == "function" then return readable("boolean", IsPlayerSpell, spellID) == true end
+    return readable("boolean", IsSpellKnown, spellID) == true
 end
 
--- A: geometry. The bar's threshold point is placed at the slot's right edge (see setThreshold).
-local slotA = slot("LEFT", "A")
-local bar = CreateFrame("StatusBar", nil, content)
-bar:SetStatusBarTexture(WHITE)
-bar:SetStatusBarColor(0, 0, 0, 0)
-bar:SetSize(BAR_LENGTH, ICON_SIZE)
-local emptyPart = CreateFrame("Frame", nil, bar)
-emptyPart:SetClipsChildren(true)
-emptyPart:SetPoint("TOPLEFT", bar:GetStatusBarTexture(), "TOPRIGHT")
-emptyPart:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT")
-local iconA = emptyPart:CreateTexture(nil, "OVERLAY")
-iconA:SetTexture(ICON)
-iconA:SetAllPoints(slotA)
-
--- B: health percent through a color curve.
-local slotB = slot("RIGHT", "B")
-local iconB = slotB:CreateTexture(nil, "OVERLAY")
-iconB:SetTexture(ICON)
-iconB:SetAllPoints()
-
--- C: kill icon through a curve on raw health.
-local slotC = slot("CENTER", "C")
-local iconC = slotC:CreateTexture(nil, "OVERLAY")
-iconC:SetTexture(ICON)
-iconC:SetAllPoints()
-
-local active = false
-local threshold = DEFAULT_THRESHOLD
-local curve -- nil if the curve APIs are missing
-local reportedA, reportedB -- first error of each method, logged once per probe
-
-local function setThreshold(percent)
-    threshold = percent
-    bar:ClearAllPoints()
-    bar:SetPoint("LEFT", slotA, "RIGHT", -BAR_LENGTH * percent / 100, 0)
-end
-
--- UnitHealthPercent may be 0-1 or 0-100; the player's own percent (if readable) tells which.
-local function percentScale()
-    local ok, p = pcall(UnitHealthPercent, "player")
-    if ok and type(p) == "number" and not isSecret(p) and p > 1.001 then return 100 end
-    return 1
-end
-
-local function buildCurve()
-    if type(UnitHealthPercent) ~= "function" then return nil, "UnitHealthPercent missing" end
-    if not (C_CurveUtil and C_CurveUtil.CreateColorCurve and Enum and Enum.LuaCurveType) then
-        return nil, "curve API missing"
+local function findAbility()
+    local _, class = UnitClass("player")
+    local info = EXECUTES[class]
+    if not info then return nil end
+    for _, id in ipairs(info.ids) do
+        if knows(id) then return id, info end
     end
-    local at = threshold / 100 * percentScale()
-    local ok, result = pcall(function()
-        local c = C_CurveUtil.CreateColorCurve()
-        c:SetType(Enum.LuaCurveType.Step)
-        c:AddPoint(0, CreateColor(1, 1, 1, 1))
-        c:AddPoint(at, CreateColor(1, 1, 1, 0))
-        return c
-    end)
-    if not ok then return nil, "error: " .. tostring(result) end
-    return result, "threshold point at " .. at
-end
-
--- Alpha the curve gives at x (plain numbers, so readable), to check the step direction.
-local function curveAlphaAt(x)
-    return describe(pcall(function()
-        local color = curve:Evaluate(x)
-        return type(color) == "table" and color.a or color
-    end))
-end
-
-local function updateA()
-    local ok, err = pcall(function()
-        bar:SetMinMaxValues(0, UnitHealthMax("target"))
-        bar:SetValue(UnitHealth("target"))
-    end)
-    if not ok and not reportedA then
-        reportedA = true
-        ns.trace("EXEC A feed error: " .. tostring(err))
+    -- By name: the English one, then the client's own name for the top rank (other languages).
+    local names = { info.name }
+    if info.ids[1] then names[2] = readable("string", C_Spell and C_Spell.GetSpellName, info.ids[1]) end
+    for _, name in ipairs(names) do
+        local spell = C_Spell and C_Spell.GetSpellInfo and readable("table", C_Spell.GetSpellInfo, name)
+        local id = spell and spell.spellID
+        if type(id) == "number" and not isSecret(id) and (knows(id) or not info.ids[1]) then return id, info end
     end
 end
 
-local function updateB()
-    if not curve then
-        iconB:Hide()
+local function updateAbility()
+    local id, info = findAbility()
+    if id == (ability and ability.spellID) then return end
+    if not id then
+        ability = nil
         return
     end
-    local ok, err = pcall(function()
-        local color = UnitHealthPercent("target", false, curve)
-        iconB:SetVertexColor(color:GetRGBA())
-    end)
-    iconB:SetShown(ok)
-    if not ok and not reportedB then
-        reportedB = true
-        ns.trace("EXEC B error: " .. tostring(err))
+    ability = { spellID = id, info = info,
+        name = readable("string", C_Spell and C_Spell.GetSpellName, id) or info.name,
+        icon = readable("number", C_Spell and C_Spell.GetSpellTexture, id)
+            or readable("string", C_Spell and C_Spell.GetSpellTexture, id) or "Interface\\Icons\\INV_Sword_48" }
+    ns.trace(string.format("EXEC watching %s (%d)", ability.name, id))
+end
+
+-- A tooltip's hit: low end, high end, damage per extra rage/energy point (Execute, Ferocious Bite). Finishers
+-- ("1 point : 122-162 damage" ... "5 points: 490-530 damage") take the row for `points` (clamped to the table;
+-- nil = 1). English first; in other languages the first number (percentages left out) is the low end and a
+-- number right after it the high end.
+local function parseHit(desc, points)
+    if type(desc) ~= "string" or isSecret(desc) then return nil end
+    local perPower = desc:match("each extra point of %a+ into (%d+%.?%d*)")
+    local rows, highest = {}, 0
+    for n, rowLow, rowHigh in desc:gmatch("(%d+)[^%d\n]-:%s*(%d+)%s*%-%s*(%d+)") do
+        n = tonumber(n)
+        rows[n] = { tonumber(rowLow), tonumber(rowHigh) }
+        highest = math.max(highest, n)
     end
-end
-
--- C state: the curve is rebuilt only when the (rounded) remaining damage changes. killMode is "alpha" (float
--- curve into SetAlpha), "color" (color curve into SetVertexColor) or nil once both have failed.
-local killCurve, killDamage, killMode
-local killReported = {} -- trace lines already logged this probe, so each finding is logged once
-
-local function traceOnce(key, line)
-    if killReported[key] then return end
-    killReported[key] = true
-    ns.trace("EXEC C " .. line)
-end
-
--- Step curve: the kill value up to the damage, the "survives" value above it. Health is whole numbers, so the
--- step sits half a point past the damage (health == damage dies).
-local function buildKillCurve(mode, damage)
-    return pcall(function()
-        if mode == "alpha" then
-            local c = C_CurveUtil.CreateCurve()
-            c:SetType(Enum.LuaCurveType.Step)
-            c:AddPoint(0, 1)
-            c:AddPoint(damage + 0.5, 0)
-            return c
+    if highest > 0 then
+        local row = rows[math.max(1, math.min(points or 1, highest))] or rows[1] or rows[highest]
+        return row[1], row[2], tonumber(perPower) or 0
+    end
+    local low, high = desc:match("(%d+) to (%d+)")
+    if not low then low = desc:match("(%d+) damage") end
+    if not low then
+        local plain = desc:gsub("%d+%s*%%", "")
+        low, high = plain:match("(%d+)[^%d]-(%d+)")
+        local between = low and plain:match(low .. "([^%d]-)" .. high)
+        if not between or #between > 8 then
+            low, high = plain:match("(%d+)"), nil
         end
-        local c = C_CurveUtil.CreateColorCurve()
-        c:SetType(Enum.LuaCurveType.Step)
-        c:AddPoint(0, CreateColor(1, 1, 1, 1))
-        c:AddPoint(damage + 0.5, CreateColor(1, 1, 1, 0))
-        return c
-    end)
+    end
+    low = tonumber(low)
+    if not low then return nil end
+    return low, tonumber(high) or low, tonumber(perPower) or 0
 end
 
--- Evaluates the curve with the target's health and applies it. Errors propagate to the caller's pcall.
-local function applyKill(mode, c)
-    local health = UnitHealth("target")
-    local value = c:Evaluate(health)
-    traceOnce("eval-" .. mode, string.format("%s: Evaluate(health secret=%s) -> %s (%s)", mode,
-        tostring(isSecret(health)), isSecret(value) and "secret" or tostring(value), type(value)))
-    if mode == "alpha" then
-        iconC:SetAlpha(value)
+local function hitOf(spellID, points)
+    return parseHit(readable("string", C_Spell and C_Spell.GetSpellDescription, spellID), points)
+end
+
+-- Rage/energy beyond the ability's cost, or nil when it can't be read.
+local function extraPower(spellID, info)
+    if not info.power then return 0 end
+    local power = readable("number", UnitPower, "player", info.power)
+    if not power then return nil end
+    local cost = info.cost or 0
+    local costs = C_Spell and readable("table", C_Spell.GetSpellPowerCost, spellID)
+    for _, c in ipairs(costs or {}) do
+        if not isSecret(c.type) and c.type == info.power and not isSecret(c.cost) and type(c.cost) == "number" then
+            cost = c.cost
+        end
+    end
+    return math.max(0, power - cost)
+end
+
+-- A finisher's combo points now: the number and whether it was read (not counted or assumed).
+local function comboPoints()
+    local points, source = ns.currentComboPoints()
+    if not points then return 1, false end
+    return points, source == "read"
+end
+
+local function learnedRatio(spellID)
+    local saved = db.execRatios and db.execRatios[spellID]
+    return saved and saved.ratio or 1
+end
+
+-- The hit to compare with the target's health, and how it was made (for the log), or nil.
+local function estimate()
+    if not ability then return nil end
+    local info, points = ability.info, nil
+    if info.finisher then
+        points = comboPoints()
+        if points <= 0 then return nil end -- read as none: nothing to finish with
+    end
+    local low, _, perPower = hitOf(ability.spellID, points)
+    if not low then return nil end
+    local extra = perPower > 0 and extraPower(ability.spellID, info) or 0
+    local ratio = learnedRatio(ability.spellID)
+    local hit = (low + perPower * (extra or 0)) * ratio
+    return hit, string.format("%s: %s%d%s x %.2f learned = %d", ability.name,
+        points and string.format("%d point(s) ", points) or "", low,
+        perPower > 0 and string.format(" + %d %s x %g", extra or 0, POWER_NAMES[info.power] or "power", perPower)
+        or "", ratio, hit)
+end
+
+---------------------------------------------------------------------------
+-- Learning from the damage meter
+---------------------------------------------------------------------------
+
+-- This combat: spellID -> { casts, expected (the tooltip's average hit, summed per cast), unclear }
+local tally = {}
+-- castGUID -> { extra (rage/energy beyond the cost, false if unreadable), points, pointsRead } when the cast was
+-- sent: both are spent by the time it succeeds.
+local atSend = {}
+
+local function onCastSent(castGUID, spellID)
+    if not ability or isSecret(spellID) or spellID ~= ability.spellID then return end
+    if not castGUID or isSecret(castGUID) then return end
+    local sent = { extra = extraPower(spellID, ability.info) or false }
+    if ability.info.finisher then sent.points, sent.pointsRead = comboPoints() end
+    atSend[castGUID] = sent
+end
+
+local function onCastSucceeded(castGUID, spellID)
+    if not ability or isSecret(spellID) or spellID ~= ability.spellID then return end
+    local sent = castGUID and not isSecret(castGUID) and atSend[castGUID]
+    if sent then atSend[castGUID] = nil end
+    local finisher = ability.info.finisher
+    local low, high, perPower = hitOf(spellID, sent and sent.points)
+    if not low then return end
+    local t = tally[spellID] or { casts = 0, expected = 0 }
+    tally[spellID] = t
+    t.casts = t.casts + 1
+    local extra = sent and sent.extra
+    -- The meter's total would have damage in it this cast's expected hit doesn't.
+    if perPower > 0 and not extra then
+        t.unclear = POWER_NAMES[ability.info.power] .. " wasn't readable at a cast"
+    elseif finisher and not (sent and sent.pointsRead) then
+        t.unclear = "combo points weren't readable at a cast (counted ones can be too few)"
+    end
+    t.expected = t.expected + (low + high) / 2 + perPower * (extra or 0)
+end
+
+-- How much crits add to an average hit: 1 + chance x (multiplier - 1). Read out of combat (after it).
+local function critFactor(info)
+    local chance
+    if info.melee then
+        chance = readable("number", GetCritChance)
     else
-        iconC:SetVertexColor(value:GetRGBA())
+        chance = readable("number", GetSpellCritChance, info.school)
     end
-    traceOnce("apply-" .. mode, mode .. ": applied without error")
+    local multiplier = info.melee and MELEE_CRIT_MULTIPLIER or SPELL_CRIT_MULTIPLIER
+    return 1 + math.max(0, math.min(100, chance or 0)) / 100 * (multiplier - 1), chance
 end
 
-local function updateC()
-    if not killMode then
-        iconC:Hide()
-        return
-    end
-    local _, total = ns.dotBreakdownForUnit("target")
-    local damage = math.floor((total or 0) + 0.5)
-    if damage <= 0 then
-        iconC:Hide()
-        killDamage = nil
-        return
-    end
-    if damage ~= killDamage then
-        local ok, result = buildKillCurve(killMode, damage)
-        if not ok then
-            traceOnce("build-" .. killMode, killMode .. " curve error: " .. tostring(result))
-            killMode = killMode == "alpha" and "color" or nil
-            killDamage = nil
-            return
+-- spells: the damage meter's rows for the combat that just ended ({ spellID, totalAmount }); counted: that combat's
+-- tally. Returns how many ratios were learned.
+local function learn(spells, counted)
+    db.execRatios = db.execRatios or {}
+    local totals = {}
+    for _, sp in ipairs(spells or {}) do
+        if not isSecret(sp.spellID) and not isSecret(sp.totalAmount) and type(sp.totalAmount) == "number" then
+            totals[sp.spellID] = sp.totalAmount
         end
-        killCurve, killDamage = result, damage
-        traceOnce("built-" .. killMode, string.format("%s curve built, step at %.1f; plain check: alpha at "
-            .. "%d=%s, at %d=%s", killMode, damage + 0.5, damage, describe(pcall(killCurve.Evaluate, killCurve,
-            damage)), damage + 1, describe(pcall(killCurve.Evaluate, killCurve, damage + 1))))
     end
-    iconC:Show()
-    local ok, err = pcall(applyKill, killMode, killCurve)
-    if not ok then
-        traceOnce("error-" .. killMode, killMode .. " error: " .. tostring(err))
-        iconC:SetAlpha(1)
-        iconC:SetVertexColor(1, 1, 1, 1)
-        killMode = killMode == "alpha" and "color" or nil
-        killDamage = nil
+    local learned = 0
+    for spellID, t in pairs(counted) do
+        local name = readable("string", C_Spell and C_Spell.GetSpellName, spellID) or tostring(spellID)
+        local total = totals[spellID]
+        if t.unclear then
+            ns.trace(string.format("EXEC LEARN %s skipped: %s", name, t.unclear))
+        elseif not total or total <= 0 then
+            ns.trace(string.format("EXEC LEARN %s skipped: no damage meter total (%d cast(s), all missed?)", name,
+                t.casts))
+        else
+            local factor, chance = critFactor(ability and ability.info or {})
+            local ratio = total / factor / t.expected
+            if ratio < LEARN_RATIO_MIN or ratio > LEARN_RATIO_MAX then
+                ns.trace(string.format("EXEC LEARN %s skipped: meter %d over %d cast(s) is %.2fx the tooltip", name,
+                    total, t.casts, ratio))
+            else
+                local old = db.execRatios[spellID]
+                local weight = old and math.min(old.weight or 0, LEARN_WEIGHT_CAP) or 0
+                local blended = ((old and old.ratio or 0) * weight + ratio * t.casts) / (weight + t.casts)
+                db.execRatios[spellID] = { ratio = math.floor(blended * 1000 + 0.5) / 1000, weight = weight + t.casts }
+                learned = learned + 1
+                ns.trace(string.format("EXEC LEARN %s: meter %d over %d cast(s), crit %s%% (x%.2f) = %.2fx the "
+                    .. "tooltip, saved %.3f", name, total, t.casts, chance and string.format("%.1f", chance) or "?",
+                    factor, ratio, db.execRatios[spellID].ratio))
+            end
+        end
     end
+    return learned
 end
+
+local function learnAfterCombat(counted, triesLeft)
+    if InCombatLockdown() then
+        ns.trace("EXEC LEARN skipped: a new fight started before the damage meter could be read")
+        return
+    end
+    local spells, why = ns.readDamageMeter()
+    if not spells and why == "wait" and triesLeft > 0 then
+        C_Timer.After(METER_RETRY_SECONDS, function() learnAfterCombat(counted, triesLeft - 1) end)
+        return
+    end
+    if not spells then
+        ns.trace("EXEC LEARN skipped: damage meter " .. (why == "wait" and "still empty or hidden" or tostring(why)))
+        return
+    end
+    learn(spells, counted)
+end
+
+---------------------------------------------------------------------------
+-- The icon
+---------------------------------------------------------------------------
+
+local window = CreateFrame("Frame", "DoesItDieExecute", UIParent)
+window:SetClipsChildren(true)
+window:SetFrameStrata("HIGH")
+window:Hide()
+
+local bar = CreateFrame("StatusBar", nil, window)
+bar:SetPoint("RIGHT", window, "RIGHT")
+bar:SetStatusBarTexture("Interface\\Buttons\\WHITE8X8")
+bar:SetStatusBarColor(0, 0, 0, 0)
+
+local icon = bar:CreateTexture(nil, "OVERLAY")
+icon:SetPoint("RIGHT", bar:GetStatusBarTexture(), "RIGHT")
+
+local pulse = icon:CreateAnimationGroup()
+pulse:SetLooping("BOUNCE")
+do
+    local fade = pulse:CreateAnimation("Alpha")
+    fade:SetFromAlpha(1)
+    fade:SetToAlpha(0.5)
+    fade:SetDuration(0.6)
+    fade:SetSmoothing("IN_OUT")
+end
+
+local testUntil -- /did exec shows it for a few seconds
+local lastAnchor, lastSize, lastX, lastY, lastIcon
+
+local function place(anchor)
+    local size = db.execSize
+    if anchor == lastAnchor and size == lastSize and db.execOffsetX == lastX and db.execOffsetY == lastY
+        and ability.icon == lastIcon then
+        return
+    end
+    lastAnchor, lastSize, lastX, lastY, lastIcon = anchor, size, db.execOffsetX, db.execOffsetY, ability.icon
+    window:SetSize(size, size)
+    bar:SetSize(BAR_LENGTH, size)
+    icon:SetSize(size, size)
+    icon:SetTexture(ability.icon)
+    window:ClearAllPoints()
+    window:SetPoint("BOTTOM", anchor, "TOP", db.execOffsetX, db.execOffsetY)
+    pulse:Play()
+end
+
+local function targetDead()
+    local dead = readable("boolean", UnitIsDead, "target")
+    return dead == true
+end
+
+-- false only when the game plainly says it can't be cast now (Execute above 20%, no rage, no combo points); unknown counts as usable.
+local function usable()
+    if not (C_Spell and C_Spell.IsSpellUsable) then return true end
+    return readable("boolean", C_Spell.IsSpellUsable, ability.spellID) ~= false
+end
+
+local lastTraced
+local function update()
+    local anchor, visibilityFrame, preview = ns.display.killIconAnchor()
+    if not (db.execShow and ability and anchor) then return window:Hide() end
+    place(anchor)
+    -- Options window preview, and /did exec: always shown, to place and size it.
+    if preview or (testUntil and GetTime() < testUntil) then
+        bar:SetMinMaxValues(0, 1)
+        bar:SetValue(1)
+        return window:Show()
+    end
+    if not UnitExists("target") or targetDead() or readable("boolean", UnitCanAttack, "player", "target") == false then
+        return window:Hide()
+    end
+    if visibilityFrame and readable("boolean", visibilityFrame.IsVisible, visibilityFrame) == false then
+        return window:Hide()
+    end
+    local hit, how = estimate()
+    if not hit or not usable() then return window:Hide() end
+    if how ~= lastTraced then
+        lastTraced = how
+        ns.trace("EXEC estimate " .. how)
+    end
+    local ok = pcall(function()
+        bar:SetMinMaxValues(0, UnitHealth("target"))
+        bar:SetValue(hit)
+    end)
+    window:SetShown(ok)
+end
+
+local events = CreateFrame("Frame")
+events:RegisterEvent("PLAYER_LOGIN")
+events:RegisterEvent("SPELLS_CHANGED")
+events:RegisterEvent("PLAYER_REGEN_ENABLED")
+events:RegisterUnitEvent("UNIT_SPELLCAST_SENT", "player")
+events:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
+events:SetScript("OnEvent", function(self, event, ...)
+    db = ns.db
+    if not db then return end
+    if event == "PLAYER_LOGIN" or event == "SPELLS_CHANGED" then
+        updateAbility()
+    elseif event == "UNIT_SPELLCAST_SENT" then
+        local _, _, castGUID, spellID = ...
+        onCastSent(castGUID, spellID)
+    elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
+        local _, castGUID, spellID = ...
+        onCastSucceeded(castGUID, spellID)
+    elseif event == "PLAYER_REGEN_ENABLED" then
+        local counted = tally
+        tally, atSend = {}, {}
+        if next(counted) == nil then return end
+        C_Timer.After(METER_RETRY_SECONDS, function() learnAfterCombat(counted, METER_TRIES) end)
+    end
+end)
 
 local sinceUpdate = 0
-holder:SetScript("OnUpdate", function(self, elapsed)
+events:SetScript("OnUpdate", function(self, elapsed)
     sinceUpdate = sinceUpdate + elapsed
     if sinceUpdate < UPDATE_INTERVAL then return end
     sinceUpdate = 0
-    if not UnitExists("target") then
-        content:Hide()
-        return
+    db = ns.db
+    if not db then return end
+    local ok, err = pcall(update)
+    if not ok then
+        window:Hide()
+        if err ~= lastTraced then
+            lastTraced = err
+            ns.trace("EXEC error: " .. tostring(err))
+        end
     end
-    content:Show()
-    updateA()
-    updateB()
-    updateC()
 end)
 
-local function traceGeometry()
-    ns.trace("EXEC geometry: holder " .. rectOf(holder) .. " | slot A " .. rectOf(slotA) .. " | bar " .. rectOf(bar)
-        .. " | fill " .. rectOf(bar:GetStatusBarTexture()) .. " | empty part " .. rectOf(emptyPart)
-        .. " | icon A visible=" .. tostring(iconA:IsVisible()) .. " | icon B visible=" .. tostring(iconB:IsVisible())
-        .. " | icon C visible=" .. tostring(iconC:IsVisible()))
-end
-
-local function start(percent)
-    setThreshold(percent)
-    reportedA, reportedB = false, false
-    holder:ClearAllPoints()
-    if not (TargetFrame and pcall(holder.SetPoint, holder, "BOTTOM", TargetFrame, "TOP", 0, 4)) then
-        holder:SetPoint("CENTER", UIParent, "CENTER", 0, 150)
-    end
-
-    ns.trace(string.format("EXEC probe at %d%%: UnitHealthPercent=%s UnitHealthMissing=%s C_CurveUtil=%s "
-        .. "LuaCurveType=%s CurveConstants=%s inCombat=%s", percent, type(UnitHealthPercent),
-        type(UnitHealthMissing), keysOf(C_CurveUtil), keysOf(Enum and Enum.LuaCurveType), keysOf(CurveConstants),
-        call(UnitAffectingCombat, "player")))
-    ns.trace("EXEC percents: target=" .. call(UnitHealthPercent, "target") .. " player="
-        .. call(UnitHealthPercent, "player") .. " target missing=" .. call(UnitHealthMissing, "target"))
-    local note
-    curve, note = buildCurve()
-    ns.trace("EXEC curve: " .. note)
-    if curve then
-        ns.trace(string.format("EXEC curve alpha at 0.1=%s 0.5=%s 10=%s 50=%s",
-            curveAlphaAt(0.1), curveAlphaAt(0.5), curveAlphaAt(10), curveAlphaAt(50)))
-    end
-
-    wipe(killReported)
-    killCurve, killDamage = nil, nil
-    if C_CurveUtil and C_CurveUtil.CreateCurve and Enum and Enum.LuaCurveType then
-        killMode = "alpha"
-    elseif C_CurveUtil and C_CurveUtil.CreateColorCurve and Enum and Enum.LuaCurveType then
-        killMode = "color"
-    else
-        killMode = nil
-    end
-    ns.trace("EXEC C kill curve mode: " .. tostring(killMode))
-
-    active = true
-    holder:Show()
-    C_Timer.After(0.5, traceGeometry)
-    ns.print(string.format("Execute probe on at %d%%. Above the target frame, icons A (geometry) and B (health "
-        .. "percent) should appear only while the target is below %d%%; C (middle, kill icon via curve) only "
-        .. "while the real kill icon shows. /did exec to stop, /reload to save the log.", percent, percent))
-end
-
--- /did exec [percent]: starts the probe, changes its threshold, or (with no percent) stops it.
-function ns.toggleExecuteProbe(percent)
-    if active and not percent then
-        active = false
-        holder:Hide()
-        ns.trace("EXEC probe off")
-        ns.print("Execute probe off.")
+-- /did exec: what's watched and estimated, and the icon shown for 5 seconds to check where it is.
+function ns.executeCommand()
+    db = ns.db
+    updateAbility()
+    if not ability then
+        ns.print(T("No execute ability found (Execute, Hammer of Wrath, Shadow Word: Death, Shadowburn, Ferocious Bite or Eviscerate)."))
         return
     end
-    start(math.max(1, math.min(99, percent or threshold)))
+    local hit, how = estimate()
+    ns.print(how or string.format(T("%s: its tooltip has no damage number this addon can read."), ability.name))
+    if not db.execShow then ns.print(T("The execute icon is switched off (options, Kill icon tab).")) end
+    testUntil = GetTime() + 5
+    ns.trace("EXEC test: " .. tostring(how))
 end
+
+function ns.forgetExecuteLearning()
+    if ns.db and ns.db.execRatios then wipe(ns.db.execRatios) end
+end
+
+-- For tests.
+ns.execute = { parseHit = parseHit, learn = learn, estimate = estimate, updateAbility = updateAbility,
+    takeTally = function() local t = tally; tally = {}; return t end }
