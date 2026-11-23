@@ -632,7 +632,7 @@ lua.execute("""
     local name, desc = C_Spell.GetSpellName, C_Spell.GetSpellDescription
     C_Spell.GetSpellName = function(id) if id == 22828 then return "Ferocious Bite" end return name(id) end
     C_Spell.GetSpellDescription = function(id) if id == 22828 then return biteText end return desc(id) end
-    energy, comboPoints = 75, 4
+    energy, comboPoints = 65, 4
     function UnitPower(unit, kind) if kind == 3 then return energy end end
     function GetComboPoints() return comboPoints end
 """)
