@@ -113,9 +113,12 @@ for _, case in ipairs(cases) do
         check(case, "finisher", ns.locale.isFinisher(case.desc), case.finisher)
         check(case, "combo points awarded", ns.locale.comboPointsAwarded(case.desc) or false, case.awarded)
     else
-        -- English must read exactly as before, for every combo point count.
+        -- English must read exactly as before, for every combo point count, except that thousands separators
+        -- are read now ("1,132" as 1132): v0.5.0 gets the text without them.
+        local plain = case.desc
+        for _ = 1, 2 do plain = plain:gsub("(%d),(%d%d%d)%f[^%d]", "%1%2") end
         for points = 0, 5 do
-            local before = { upstreamParse(case.desc, points > 0 and points or nil) }
+            local before = { upstreamParse(plain, points > 0 and points or nil) }
             local now = { addon.parseDot(case.desc, points > 0 and points or nil) }
             for i = 1, 4 do
                 check(case, "same as v0.5.0 (" .. points .. " points, value " .. i .. ")", now[i], before[i])

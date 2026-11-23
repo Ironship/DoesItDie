@@ -1,5 +1,15 @@
 # DoesItDie
 
+## v0.10.0
+
+**Restart the game fully after updating** (not just /reload): this version adds a new file.
+
+- **Party DoTs** (issue #25): with "Share DoTs with party" ticked (Marker tab), your DoTs and your party members' add up on the marker and the kill icon, with theirs in their own color ("Party DoT color"). Everyone in the group needs DoesItDie with the option on: Forever hides other players' casts from addons, so each copy sends its own DoTs to the others. Open world only: in dungeons the game hides which mob is which, and it blocks addon messages during boss fights. Off by default. Thanks to epriv for the patch.
+- **Execute kill icon:** when your execute or finisher would kill the target (Execute, Hammer of Wrath, Shadow Word: Death, Shadowburn, Ferocious Bite or Eviscerate), its icon shows above the kill icon. Finishers use your current combo points. The hit is estimated on the low side (from the tooltip, then learned from the damage meter after each fight), so it may show a little late but shouldn't show too early. On by default; turn it off, resize or move it on the Kill icon tab. `/did exec` shows it for 5 seconds with its estimate.
+- **Druid Lacerate:** recasting it adds a stack and refreshes the duration instead of losing the DoT, and the marker counts every stack.
+- **No more once-a-second stutter after long sessions** (issue #36). A layering check on the target frame ran every second even with nothing to show, and got slower as other addons hung frames there. It now only runs while the marker or kill icon is showing, and stops after 300 frames. If it's ever slow, the `/did debug` log says so once (`SLOW layer check`).
+- **Spells that deal over 999 damage are read correctly.** Tooltips like "1,002 Shadow damage" were read as 2 damage, so the marker for high ranks (Shadow Word: Pain and Bane of Agony rank 6, among others) was only a sliver. Thanks to pazzypaz, octy and everyone who reported it on CurseForge.
+
 ## v0.9.4
 
 - **Rip and Rupture no longer vanish when an auto-attack misses at the same moment.** A miss right after a finisher was always taken as the finisher missing. Now the addon checks your combo points: if they were spent, the finisher landed and its marker stays.
