@@ -909,6 +909,32 @@ sim.succeed(1, sim.send(1, None, "Wolf"))
 check("Dead hard target and a same-named soft enemy: the DoT goes on the soft enemy",
       (sim.markerOn("B"), sim.markerOn("corpse")), ("40 dmg", "0 dmg"))
 
+# Upstream bug fixes (Ironship / DoesItDiePlus, round 2).
+# 1. An avoided cast dealt no upfront hit: learnFromMeter must not subtract its upfront hit from the meter total.
+sim.reset(); sim.cast(8); hidden_ticks(5, 3, 4)
+sim.advance(1); sim.cast(8); sim.avoid("RESIST", 4)
+check("Meter: Immolate cast 1 ticks (37), cast 2 resisted: avoids subtracting cast 2's upfront hit (4.8, was 3.5)",
+      (sim.meter(8, 37), sim.learned(8)), (1, 4.8))
+
+# 2. A landed Rip recast dropped by a simultaneous white-swing miss is still restored when the old Rip expired during
+# the 0.5s combo-point check window.
+sim.reset(); sim.learn("4x2", 21.9); sim.comboAPI(2); sim.cast(4)  # 2-point Rip (131 over 12s, every 2s)
+for _ in range(5):
+    sim.advance(2.0); sim.hiddenHit(1)     # keep the first Rip alive up to 10s
+sim.advance(2.2)                           # 12.2s: past 12s, expires at 12.45s (inside the 0.5s check window)
+sim.comboAPI(2); sim.cast(4); sim.comboAPI(0); sim.advance(0.05); sim.avoid("MISS", 1)
+sim.advance(0.55)                          # old Rip expires at 12.45s; check runs at 12.75s -> must restore new Rip
+check("Rip recast + white miss while old Rip expires during 0.5s check: restored", sim.marker(), "131 dmg from 1 DoT(s)")
+
+# 3. Lacerate stacked right after an early tick (within TICK_MATCH_WINDOW): schedule must not roll back and double-count.
+sim.reset(); base = sim.time(); sim.learn(20, 4); sim.cast(20)
+at(3.0); sim.hiddenHit(1)                  # tick 1
+at(5.85); sim.hiddenHit(1)                 # tick 2 lands 0.15s early (slot 6.0 already consumed)
+at(5.95); sim.cast(20)                     # stack 2 cast before nominal 6.0
+at(6.10); sim.hiddenHit(1)                 # white hit right after 6.0 must NOT double-count slot 6.0
+check("Lacerate stacked right after early tick: white hit doesn't double-count the tick", ticks("Lacerate"), 2)
+check("  next tick is 9.0, 5 ticks left at 2 stacks (40 dmg, not 48)", sim.marker(), "40 dmg from 1 DoT(s)")
+
 print(f"\n{'all passed' if not failures else str(failures) + ' FAILED'}")
 if failures:
     print("\nlog of last scenario:\n" + sim.log())

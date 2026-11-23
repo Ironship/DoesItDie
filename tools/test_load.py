@@ -1351,6 +1351,39 @@ check("  secret unit attribute is skipped",
       same(ns.frameRoot(G.ElvUF_Target.Health, "target"), G.ElvUF_Target), True)
 lua.execute("issecretvalue = nil")
 
+# Hidden Edit Mode selection frame (HIGH/1000) under target frame must not pull the marker into its strata/level.
+lua.execute("""
+    local sel = CreateFrame("Frame", nil, ElvUF_Target)
+    sel:SetFrameStrata("HIGH")
+    sel:SetFrameLevel(1000)
+    sel:Hide()
+    function sel:GetChildren() layerVisits = layerVisits + 1 return unpack(self.children) end
+""")
+G.targetGuid = "Creature-0-1-2-3-3099-000001"
+H.fire("PLAYER_TARGET_CHANGED")
+H.fire("UNIT_SPELLCAST_SUCCEEDED", "player", "cast-E2", 172)
+H.update(1.1)
+check("  hidden selection frame doesn't pull marker to HIGH/1000",
+      (G.DoesItDieRemaining.strata, G.DoesItDieRemaining.level), ("MEDIUM", 41))
+
+# Overlay StatusBars (TempMaxHealthLoss, absorb, prediction) are ignored by Pick and redirected to HealthBar.
+lua.execute("""
+    local holder = CreateFrame("Frame", "CamelotBarsHolder", UIParent)
+    local realBar = CreateFrame("StatusBar", nil, holder)
+    local lossBar = CreateFrame("StatusBar", nil, holder)
+    function realBar:GetParentKey() return "HealthBar" end
+    function lossBar:GetParentKey() return "TempMaxHealthLoss" end
+    holder.HealthBar = realBar
+    holder.TempMaxHealthLoss = lossBar
+    DoesItDieDB.customHealthBar = "CamelotBarsHolder.TempMaxHealthLoss"
+""")
+check("  isOverlayBar flags TempMaxHealthLoss, not HealthBar",
+      (ns.isOverlayBar(G.CamelotBarsHolder.TempMaxHealthLoss), ns.isOverlayBar(G.CamelotBarsHolder.HealthBar)),
+      (True, False))
+check("  healthBarOf redirects saved TempMaxHealthLoss to sibling HealthBar",
+      same(ns.healthBarOf(G.CamelotBarsHolder.TempMaxHealthLoss), G.CamelotBarsHolder.HealthBar), True)
+lua.execute('DoesItDieDB.customHealthBar = "ElvUF_Target.Health"')
+
 
 # Party DoTs (Party.lua, issue #25): a party member's message adds to the target's total and the API's list, only
 # with the option on. Party.lua's own behavior is in tools/test_party.py; this checks the wiring.

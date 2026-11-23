@@ -699,7 +699,7 @@ local function attach(force)
     if previewHost then
         portrait, bar = previewHost.portrait, previewHost.healthBar
     else
-        typedBar = ns.resolveFramePath(db.customHealthBar)
+        typedBar = ns.healthBarOf(ns.resolveFramePath(db.customHealthBar))
         -- Without a working path, a known replacement target frame (EllesmereUI's) comes before Blizzard's.
         if typedBar then
             customBar = typedBar
@@ -766,12 +766,22 @@ local LAYER_CHECK_INTERVAL = 1
 local MAX_LAYER_FRAMES = 300
 local SLOW_LAYER_MS = 10
 
--- Highest strata/level anywhere in the target frame's tree (and how many frames were visited). Blizzard (Edit
--- Mode) re-layers the target frame after addons load, so a level picked once at load ends up underneath the
--- health bar and portrait.
+-- Highest strata/level of the target frame and of what is shown under it (and how many frames were visited).
+-- Blizzard (Edit Mode) re-layers the target frame after addons load, so a level picked once at load ends up
+-- underneath the health bar and portrait. Hidden children draw nothing, and Edit Mode keeps a hidden selection
+-- frame (MEDIUM, level 1000) under every Blizzard unit frame whose own art is LOW — counting it pulled the
+-- marker and skull into the world map's strata, above the map's art.
 local function targetFrameTopLayer()
+    local root = layerRoot or healthBar
+    if not root or root == UIParent then return "BACKGROUND", 0, 0 end
     local topStrata, topLevel, visited = "BACKGROUND", 0, 0
     local function visit(frame, depth)
+        if depth > 0 then
+            local okShown, shown = pcall(frame.IsShown, frame)
+            if okShown and not isSecret(shown) and shown == false then return end
+        end
+        local okForb, forb = pcall(function() return frame.IsForbidden and frame:IsForbidden() end)
+        if not okForb or isSecret(forb) or forb then return end
         visited = visited + 1
         if visited > MAX_LAYER_FRAMES then return end
         -- Some of Blizzard's frames report a secret strata/level in Forever; those can't be compared, so skip
@@ -792,7 +802,7 @@ local function targetFrameTopLayer()
             end
         end
     end
-    visit(layerRoot or healthBar or UIParent, 0)
+    visit(root, 0)
     return topStrata, topLevel, visited
 end
 
