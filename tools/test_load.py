@@ -639,6 +639,27 @@ lua.execute("""
 G.biteText = BITE
 step("now a druid", lambda: (H.fire("SPELLS_CHANGED"), H.update(0.2)))
 check("  watching Ferocious Bite", any("watching Ferocious Bite (22828)" in l for l in exec_log()), True)
+# Forever renumbers ranks: with only rank 1's Classic ID "known", the real top rank (another ID) is in the spellbook.
+lua.execute("""
+    function IsPlayerSpell(id) return id == 22568 or id == 99999 end
+    local name, desc = C_Spell.GetSpellName, C_Spell.GetSpellDescription
+    C_Spell.GetSpellName = function(id) if id == 22568 or id == 99999 then return "Ferocious Bite" end return name(id) end
+    C_Spell.GetSpellDescription = function(id)
+        if id == 22568 then return "Finishing move that causes damage per combo point. 1 point : 50-66 damage "
+            .. "5 points: 186-202 damage" end
+        if id == 99999 then return biteText end
+        return desc(id)
+    end
+    C_SpellBook = { GetSpellBookItemInfo = function(index)
+        local ids = { 1126, 22568, 99999 }
+        if ids[index] then return { spellID = ids[index], name = C_Spell.GetSpellName(ids[index]) } end
+    end }
+""")
+step("spellbook has Forever's rank 3 under a new ID", lambda: (H.fire("SPELLS_CHANGED"), H.update(0.2)))
+check("  watches the strongest rank, not rank 1", any("watching Ferocious Bite (99999)" in l and "22568=186" in l
+                                                       for l in exec_log()), True)
+lua.execute("C_SpellBook = nil; function IsPlayerSpell(id) return id == 22828 end")
+step("  back to the Classic ID", lambda: (H.fire("SPELLS_CHANGED"), H.update(0.2)))
 check("  4 points, 40 extra energy: 398 + 80", estimate(), 478)
 G.targetHealth = 400
 step("finisher: the plate isn't the target's", lambda: H.update(0.2))

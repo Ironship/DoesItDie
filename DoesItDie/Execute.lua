@@ -71,35 +71,91 @@ local function knows(spellID)
     return readable("boolean", IsSpellKnown, spellID) == true
 end
 
+-- Every rank the player knows, by ID list, by name and from the spellbook, then the one whose tooltip hits hardest
+-- at full combo points. Forever renumbers some ranks (its Ferocious Bite rank 3 is level 48, not Classic's 44), so
+-- "highest known ID in the list" can land on rank 1 (log 2026-11-23: watched 22568 with rank 3 learned).
+local parseHit -- below
+
+local function spellbookIDs(names)
+    local found = {}
+    local SB = C_SpellBook
+    local bank = Enum and Enum.SpellBookSpellBank and Enum.SpellBookSpellBank.Player or "spell"
+    for index = 1, 1000 do
+        local id, name
+        if SB and SB.GetSpellBookItemInfo then
+            local info = readable("table", SB.GetSpellBookItemInfo, index, bank)
+            if not info then break end
+            id, name = info.spellID or info.actionID, info.name
+        elseif GetSpellBookItemInfo then
+            local ok, kind, spellID = pcall(GetSpellBookItemInfo, index, "spell")
+            if not ok or not kind then break end
+            if kind == "SPELL" then id = spellID end
+        else
+            break
+        end
+        if type(id) == "number" and not isSecret(id) then
+            name = name or readable("string", C_Spell and C_Spell.GetSpellName, id)
+            if name and names[name] then found[#found + 1] = id end
+        end
+    end
+    return found
+end
+
 local function findAbility()
     local _, class = UnitClass("player")
     local info = EXECUTES[class]
-    if not info then return nil end
+    if not info then return nil, nil, "class " .. tostring(class) .. " has none" end
+    local names = { [info.name] = true }
     for _, id in ipairs(info.ids) do
-        if knows(id) then return id, info end
+        local name = readable("string", C_Spell and C_Spell.GetSpellName, id)
+        if name then names[name] = true end
     end
-    -- By name: the English one, then the client's own name for the top rank (other languages).
-    local names = { info.name }
-    if info.ids[1] then names[2] = readable("string", C_Spell and C_Spell.GetSpellName, info.ids[1]) end
-    for _, name in ipairs(names) do
+    local candidates, seen = {}, {}
+    local function add(id)
+        if type(id) == "number" and not isSecret(id) and not seen[id] then
+            seen[id] = true
+            candidates[#candidates + 1] = id
+        end
+    end
+    for _, id in ipairs(info.ids) do if knows(id) then add(id) end end
+    for name in pairs(names) do
         local spell = C_Spell and C_Spell.GetSpellInfo and readable("table", C_Spell.GetSpellInfo, name)
         local id = spell and spell.spellID
-        if type(id) == "number" and not isSecret(id) and (knows(id) or not info.ids[1]) then return id, info end
+        if type(id) == "number" and not isSecret(id) and (knows(id) or not info.ids[1]) then add(id) end
     end
+    local ok, fromBook = pcall(spellbookIDs, names)
+    if ok then for _, id in ipairs(fromBook) do add(id) end end
+    local best, bestHit, parts = nil, -1, {}
+    for _, id in ipairs(candidates) do
+        local low = parseHit(readable("string", C_Spell and C_Spell.GetSpellDescription, id), 5)
+        parts[#parts + 1] = id .. "=" .. tostring(low)
+        if (low or 0) > bestHit then best, bestHit = id, low or 0 end
+    end
+    if not best then return nil, nil, "none of " .. info.name .. "'s ranks known" end
+    return best, info, table.concat(parts, " ")
 end
 
+local ABILITY_RETRY_SECONDS = 3
+local lastAbilityTry, lastAbilityWhy = -math.huge, nil
+
 local function updateAbility()
-    local id, info = findAbility()
-    if id == (ability and ability.spellID) then return end
+    lastAbilityTry = GetTime()
+    local id, info, why = findAbility()
     if not id then
         ability = nil
+        if why ~= lastAbilityWhy then
+            lastAbilityWhy = why
+            ns.trace("EXEC no ability watched: " .. tostring(why))
+        end
         return
     end
+    if id == (ability and ability.spellID) then return end
+    lastAbilityWhy = nil
     ability = { spellID = id, info = info,
         name = readable("string", C_Spell and C_Spell.GetSpellName, id) or info.name,
         icon = readable("number", C_Spell and C_Spell.GetSpellTexture, id)
             or readable("string", C_Spell and C_Spell.GetSpellTexture, id) or "Interface\\Icons\\INV_Sword_48" }
-    ns.trace(string.format("EXEC watching %s (%d)", ability.name, id))
+    ns.trace(string.format("EXEC watching %s (%d); ranks known, low end at 5 points: %s", ability.name, id, why))
 end
 
 -- Strip thousands separators ("1,020", "1.020", "1 020", "1\194\160020") while leaving decimals ("2.0") intact.
@@ -117,7 +173,7 @@ end
 -- ("1 point : 122-162 damage" ... "5 points: 490-530 damage") take the row for `points` (clamped to the table;
 -- nil = 1). English first; in other languages the first number (percentages left out) is the low end and a
 -- number right after it the high end.
-local function parseHit(desc, points)
+function parseHit(desc, points)
     if type(desc) ~= "string" or isSecret(desc) then return nil end
     desc = plainNumbers(desc)
     local perPower = desc:match("each extra point of %a+ into (%d+%.?%d*)")
@@ -362,6 +418,8 @@ end
 
 local lastTraced
 local function update()
+    -- The spellbook can still be loading at login: keep looking while nothing's watched.
+    if not ability and GetTime() - lastAbilityTry >= ABILITY_RETRY_SECONDS then updateAbility() end
     local anchor, visibilityFrame, preview = ns.display.killIconAnchor()
     if not (db.execShow and ability and anchor) then return window:Hide() end
     place(anchor)
@@ -495,13 +553,14 @@ end
 local events = CreateFrame("Frame")
 events:RegisterEvent("PLAYER_LOGIN")
 events:RegisterEvent("SPELLS_CHANGED")
+events:RegisterEvent("PLAYER_ENTERING_WORLD")
 events:RegisterEvent("PLAYER_REGEN_ENABLED")
 events:RegisterUnitEvent("UNIT_SPELLCAST_SENT", "player")
 events:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
 events:SetScript("OnEvent", function(self, event, ...)
     db = ns.db
     if not db then return end
-    if event == "PLAYER_LOGIN" or event == "SPELLS_CHANGED" then
+    if event == "PLAYER_LOGIN" or event == "SPELLS_CHANGED" or event == "PLAYER_ENTERING_WORLD" then
         updateAbility()
     elseif event == "UNIT_SPELLCAST_SENT" then
         local _, _, castGUID, spellID = ...
