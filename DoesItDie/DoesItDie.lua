@@ -547,9 +547,10 @@ local function displayedComboPoints()
     return count
 end
 
--- Returns the best plain reading (or nil) and a description of what each API returned, for the log.
+-- Returns the best plain reading (or nil), a description of what each API returned for the log, and whether the
+-- number came from a game API (GetComboPoints / UnitPower) rather than the UI display fallback.
 local function readComboPoints()
-    local best, parts = nil, {}
+    local best, parts, fromApi = nil, {}, false
     local function consider(label, ok, points)
         table.insert(parts, label .. "=" .. describeReading(ok, points))
         if ok and type(points) == "number" and not isSecret(points) then best = math.max(best or 0, points) end
@@ -563,9 +564,10 @@ local function readComboPoints()
     if best == nil then
         consider("display", true, displayedComboPoints())
     else
+        fromApi = true
         table.insert(parts, "display=not needed")
     end
-    return best, table.concat(parts, " ")
+    return best, table.concat(parts, " "), fromApi
 end
 
 local function rememberComboPoints()
@@ -843,8 +845,8 @@ end
 -- The combo points right now, for Execute.lua's finisher icon: points and "read" (an API or Blizzard's display),
 -- "counted" or nil and "unknown". A readable 0 from the APIs is a real 0; a count beats a 0 from the display only.
 function ns.currentComboPoints()
-    local points = readComboPoints()
-    if points and points > 0 then return points, "read" end
+    local points, _, fromApi = readComboPoints()
+    if points and (points > 0 or fromApi) then return points, "read" end
     if lastComboPoints and GetTime() - lastComboAt <= COMBO_CACHE_SECONDS then return lastComboPoints, "read" end
     if countedPoints > 0 then return countedPoints, "counted" end
     if points then return points, "read" end
@@ -1599,6 +1601,7 @@ ns.trace = trace
 function ns.resetLearnedTicks()
     wipe(db.ticks)
     if db.tickWeights then wipe(db.tickWeights) end
+    if ns.forgetExecuteLearning then ns.forgetExecuteLearning() end
     dropSnapshots()
     print(T("Learned tick sizes cleared."))
 end
@@ -1860,10 +1863,7 @@ SlashCmdList.DOESITDIE = function(msg)
         db.debug = not db.debug
         print(db.debug and T("Debug ON.") or T("Debug OFF."))
     elseif cmd == "reset" then
-        wipe(db.ticks)
-        if db.tickWeights then wipe(db.tickWeights) end
-        ns.forgetExecuteLearning()
-        print(T("Learned tick sizes cleared."))
+        ns.resetLearnedTicks()
     elseif cmd == "ticks" then
         ns.toggleTickViewer()
     else
