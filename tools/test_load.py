@@ -632,13 +632,34 @@ lua.execute("""
     local name, desc = C_Spell.GetSpellName, C_Spell.GetSpellDescription
     C_Spell.GetSpellName = function(id) if id == 22828 then return "Ferocious Bite" end return name(id) end
     C_Spell.GetSpellDescription = function(id) if id == 22828 then return biteText end return desc(id) end
-    energy, comboPoints = 75, 4
+    energy, comboPoints = 65, 4
     function UnitPower(unit, kind) if kind == 3 then return energy end end
     function GetComboPoints() return comboPoints end
 """)
 G.biteText = BITE
 step("now a druid", lambda: (H.fire("SPELLS_CHANGED"), H.update(0.2)))
 check("  watching Ferocious Bite", any("watching Ferocious Bite (22828)" in l for l in exec_log()), True)
+# Forever renumbers ranks: with only rank 1's Classic ID "known", the real top rank (another ID) is in the spellbook.
+lua.execute("""
+    function IsPlayerSpell(id) return id == 22568 or id == 99999 end
+    local name, desc = C_Spell.GetSpellName, C_Spell.GetSpellDescription
+    C_Spell.GetSpellName = function(id) if id == 22568 or id == 99999 then return "Ferocious Bite" end return name(id) end
+    C_Spell.GetSpellDescription = function(id)
+        if id == 22568 then return "Finishing move that causes damage per combo point. 1 point : 50-66 damage "
+            .. "5 points: 186-202 damage" end
+        if id == 99999 then return biteText end
+        return desc(id)
+    end
+    C_SpellBook = { GetSpellBookItemInfo = function(index)
+        local ids = { 1126, 22568, 99999 }
+        if ids[index] then return { spellID = ids[index], name = C_Spell.GetSpellName(ids[index]) } end
+    end }
+""")
+step("spellbook has Forever's rank 3 under a new ID", lambda: (H.fire("SPELLS_CHANGED"), H.update(0.2)))
+check("  watches the strongest rank, not rank 1", any("watching Ferocious Bite (99999)" in l and "22568=186" in l
+                                                       for l in exec_log()), True)
+lua.execute("C_SpellBook = nil; function IsPlayerSpell(id) return id == 22828 end")
+step("  back to the Classic ID", lambda: (H.fire("SPELLS_CHANGED"), H.update(0.2)))
 check("  4 points, 40 extra energy: 398 + 80", estimate(), 478)
 G.targetHealth = 400
 step("finisher: the plate isn't the target's", lambda: H.update(0.2))
@@ -660,6 +681,12 @@ H.fire("UNIT_POWER_FREQUENT", "player", "COMBO_POINTS")
 G.comboPoints = 0
 check("  API 0 beats stale cached combo points", list(ns.currentComboPoints()), [0, "read"])
 check("  no combo points: no estimate", estimate(), None)
+check("  and /did exec says it's the combo points, not the tooltip", "no combo points" in str(ns.execute.estimate()[1]), True)
+G.biteText = "Finishing move."
+G.comboPoints = 3
+check("  unreadable tooltip: /did exec shows what came back", "\"Finishing move.\"" in str(ns.execute.estimate()[1]), True)
+G.biteText = BITE
+G.comboPoints = 0
 # A finisher cast sent when API already reports 0 points must not learn against the 1-point row.
 G.combat = True
 H.fire("UNIT_SPELLCAST_SENT", "player", "", "fb-zero", 22828)
