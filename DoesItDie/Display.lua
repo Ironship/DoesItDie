@@ -108,6 +108,9 @@ local function dotColor(entry, mode)
     if (mode or db.dotColors) == "school" then
         return SCHOOL_COLORS[entry.school] or COLOR_BY_ID.white
     end
+    -- Never index the palette with a nil: an entry without a name (a new kind of provisional DoT, say) would error
+    -- here and take the whole display down with it.
+    entry.name = entry.name or tostring(entry.spellID)
     local index = paletteIndexByName[entry.name]
     if not index then
         index = (nextPaletteIndex - 1) % #DOT_PALETTE + 1
