@@ -627,6 +627,11 @@ local function refreshPlates()
     end
 end
 
+-- For Execute.lua's icon on plates: a plate's health bar and host (see findHealthBar), and the options window's mock
+-- plate ({ plate, healthBar }) while it's shown.
+ns.plateHealthBar = findHealthBar
+ns.platePreview = function() return previewState and previewPlate end
+
 -- The same marker and kill icon on another health bar (Focus.lua). Widgets live on `host`, made once and
 -- re-anchored when the bar changes; draw takes the breakdown, max health and health (secret or plain).
 ns.barMarker = {

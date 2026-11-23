@@ -111,6 +111,8 @@ local DEFAULTS = {
     execSize = 32,
     execOffsetX = 0,
     execOffsetY = 4,
+    execPlates = true,  -- the same icon on enemy nameplates (right of the bar; the kill icon's default is left)
+    execPlateSize = 18,
     -- Damage marker
     showMarkers = true,
     fillTexture = "stripes",

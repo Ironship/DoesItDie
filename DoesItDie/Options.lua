@@ -854,6 +854,11 @@ local function buildTabs()
     icon:slider("execSize", "Execute icon size", 16, 64, 2, { enabledIf = execOn })
     icon:slider("execOffsetX", "Execute icon horizontal offset", -150, 150, 1, { enabledIf = execOn })
     icon:slider("execOffsetY", "Execute icon vertical offset", -150, 150, 1, { enabledIf = execOn })
+    icon:checkbox("execPlates", "Execute icon on nameplates", { enabledIf = execOn, tooltip = "The same icon right "
+        .. "of every enemy nameplate your execute would kill. Finishers only on your target's plate, since combo points "
+        .. "are your target's." })
+    icon:slider("execPlateSize", "Nameplate execute icon size", 10, 40, 1,
+        { enabledIf = function(s) return s.execShow and s.execPlates end })
 
     local marker = addTab("Marker")
     marker:checkbox("showMarkers", "Show damage marker", { tooltip = "Marks the damage your DoTs still have to "
