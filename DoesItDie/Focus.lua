@@ -36,7 +36,7 @@ end
 -- The bar to draw on, and a description of it for the options window.
 local function focusBar(db)
     local path = strtrim(db.customFocusHealthBar or "")
-    local custom = path ~= "" and ns.resolveFramePath(path)
+    local custom = path ~= "" and ns.healthBarOf(ns.resolveFramePath(path))
     if custom then return custom, "|cff66ff66" .. path .. "|r" end
     local known, owner = ns.knownFocusFrame()
     local fallback = (known and (owner .. " focus frame")) or (blizzardFocusBar() and "Blizzard's focus frame")
@@ -116,8 +116,16 @@ local layerCheckedAt, topStrata, topLevel, layerBar = -math.huge, nil, nil, nil
 local MAX_LAYER_FRAMES = 300 -- as in Display.lua: other addons' frames under it can make the walk slow (#36)
 
 local function topLayer(root)
+    if not root or root == UIParent then return "BACKGROUND", 0 end
     local bestStrata, bestLevel, visited = "BACKGROUND", 0, 0
     local function visit(frame, depth)
+        if depth > 0 then
+            -- Hidden children draw nothing; Edit Mode keeps a hidden MEDIUM/1000 selection frame under FocusFrame.
+            local okShown, shown = pcall(frame.IsShown, frame)
+            if okShown and not isSecret(shown) and shown == false then return end
+        end
+        local okForb, forb = pcall(function() return frame.IsForbidden and frame:IsForbidden() end)
+        if not okForb or isSecret(forb) or forb then return end
         visited = visited + 1
         if visited > MAX_LAYER_FRAMES then return end
         -- Some of Blizzard's frames report a secret strata/level; those are skipped (their children aren't).

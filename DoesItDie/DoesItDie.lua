@@ -448,7 +448,7 @@ local function tallyFor(dot)
     if not dot.tickKey then return nil end
     local t = combatTally[dot.tickKey]
     if not t then
-        t = { spellID = dot.spellID, name = dot.name, factors = 0, ticks = 0, direct = 0,
+        t = { spellID = dot.spellID, name = dot.name, factors = 0, ticks = 0,
             descTick = dot.total / dot.totalTicks, dots = {} }
         combatTally[dot.tickKey] = t
     end
@@ -456,11 +456,16 @@ local function tallyFor(dot)
 end
 
 -- direct nil: the description's upfront hit can't be told apart (another client language).
+-- Kept per cast (dot.directPart) so an avoided cast's upfront hit isn't subtracted in learnFromMeter.
 local function tallyCast(dot, direct)
     local t = tallyFor(dot)
     if not t then return end
     t.dots[#t.dots + 1] = dot
-    if direct == nil then t.unclear = true else t.direct = t.direct + direct end
+    if direct == nil then
+        t.unclear = true
+    else
+        dot.directPart = direct
+    end
 end
 
 local function tallyHiddenTick(dot, factor)
@@ -770,7 +775,10 @@ local function resolveComboCheck(now)
         return
     end
     local dots = dotsByTarget[cast.key]
-    if (dots and dots[cast.name]) ~= check.replaced or now >= check.dot.expiresAt then return end
+    local current = dots and dots[cast.name]
+    -- The DoT that this recast replaced may have expired during the 0.5s check window; that still leaves the slot clear.
+    local expired = check.replaced and current == nil and now > check.replaced.expiresAt + TICK_MATCH_WINDOW
+    if (current ~= check.replaced and not expired) or now >= check.dot.expiresAt then return end
     dotsByTarget[cast.key] = dots or {}
     dotsByTarget[cast.key][cast.name] = check.dot
     check.dot.avoided = nil
@@ -893,6 +901,11 @@ end
 local function stackOnto(dot, previous, cap)
     local anchor = previous.firstTickAt or previous.appliedAt
     local slot = anchor + math.max(0, math.floor((dot.appliedAt - anchor) / previous.interval)) * previous.interval
+    -- If the tick for the next slot already landed slightly early (within TICK_MATCH_WINDOW), keep it
+    -- in the past so the refreshed schedule doesn't roll back and double-count it.
+    while dot.interval > 0 and previous.nextTickAt and slot + dot.interval < previous.nextTickAt - TICK_MATCH_WINDOW do
+        slot = slot + dot.interval
+    end
     dot.stacks = math.min(cap, (previous.stacks or 1) + 1)
     dot.appliedAt, dot.nextTickAt, dot.expiresAt = slot, slot + dot.interval, slot + dot.duration
     if previous.firstTickAt then dot.firstTickAt, dot.lastTickIndex = slot, 0 end
@@ -1347,7 +1360,11 @@ local function learnFromMeter(spells, counted)
         if skip then
             if skip ~= "" then trace(string.format("LEARN %s skipped: %s", name, skip)) end
         else
-            local ratio = total / (t.direct + t.descTick * t.factors)
+            local direct = 0
+            for _, dot in ipairs(t.dots) do
+                if not dot.avoided and dot.directPart then direct = direct + dot.directPart end
+            end
+            local ratio = total / (direct + t.descTick * t.factors)
             if ratio < LEARN_RATIO_MIN or ratio > LEARN_RATIO_MAX then
                 trace(string.format("LEARN %s skipped: meter %d over %d tick(s) is %.2fx the description", name,
                     total, t.ticks, ratio))
@@ -1361,7 +1378,7 @@ local function learnFromMeter(spells, counted)
                 dropSnapshots(key)
                 learned = learned + 1
                 trace(string.format("LEARN %s: meter %d over %d tick(s)%s = %.1f per tick (description %.1f), saved %.1f",
-                    name, total, t.ticks, t.direct > 0 and " minus upfront hit" or "", tick, t.descTick, db.ticks[key]))
+                    name, total, t.ticks, direct > 0 and " minus upfront hit" or "", tick, t.descTick, db.ticks[key]))
             end
         end
     end
