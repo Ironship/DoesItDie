@@ -37,7 +37,7 @@ local POWER_NAMES = { [RAGE] = "rage", [ENERGY] = "energy" }
 local EXECUTES = {
     WARRIOR = { name = "Execute", ids = { 20662, 20661, 20660, 20658, 5308 }, melee = true, power = RAGE, cost = 15 },
     DRUID = { name = "Ferocious Bite", ids = { 31018, 22829, 22828, 22827, 22568 }, melee = true, finisher = true,
-        power = ENERGY, cost = 35 },
+        power = ENERGY, cost = 25 },
     ROGUE = { name = "Eviscerate", ids = { 31016, 11300, 11299, 8624, 8623, 6762, 6761, 6760, 2098 }, melee = true,
         finisher = true },
     PALADIN = { name = "Hammer of Wrath", ids = { 24239, 24274, 24275 }, school = 2 },
