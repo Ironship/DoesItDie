@@ -495,10 +495,12 @@ local lastBuilder    -- { key, points, at }: builder whose outcome isn't known y
 -- A DoT with a direct part (Rake, Immolate) gets two results: the direct part can hit while the DoT itself is
 -- IMMUNE (a bleed on a mob immune to bleeds). So a cast whose direct part hit stays pending (landedAt) for the
 -- rest of its window, and only an IMMUNE can still remove its DoT.
-local lastDotCast    -- { key, name, dot, previous, at, landedAt, comboRead }: DoT cast whose outcome isn't known yet
--- A finisher DoT dropped for an avoid, until the combo points say whose avoid it was (see removeAvoidedDot).
-local FINISHER_CHECK_DELAY = 0.5
-local finisherCheck  -- { cast, dot, replaced, action, school, at }
+local lastDotCast    -- { key, name, dot, previous, at, landedAt, comboRead, builderRead, awarded }: DoT cast
+                     -- whose outcome isn't known yet
+-- A finisher or builder DoT dropped for an avoid, until the combo points say whose avoid it was (removeAvoidedDot).
+local COMBO_CHECK_DELAY = 0.5
+local comboCheck  -- { cast, dot, replaced, action, school, at }
+local builderAtSend -- combo points read when a builder (Rake) was sent, or nil
 local lastOutcome    -- { key, avoided, action, school, at, immune }: most recent outcome on a mob; a hit keeps
                      -- an IMMUNE just before it in .immune
 local armedTrap      -- { spellID, name, total, school, duration, interval, placedAt, expiresAt }: see TRAP_DOTS
@@ -641,7 +643,14 @@ local function onCastSent(spellID, castGUID, targetName)
         sentTargets[castGUID] = { key = sentTargetKey(targetName), at = now }
     end
     local ok, _, desc = pcall(spellNameAndDescription, spellID)
-    if not ok or not isFinisherDescription(desc) then return end
+    if not ok or type(desc) ~= "string" or isSecret(desc) then return end
+    if not isFinisherDescription(desc) then
+        -- A builder's points before it lands, for judging an avoid right after it (resolveComboCheck).
+        if desc:match("Awards (%d+) combo point") or ns.locale.comboPointsAwarded(desc) then
+            builderAtSend = readComboPoints()
+        end
+        return
+    end
     local points, readings = readComboPoints()
     comboAtSend = points
     trace("COMBO at send: " .. readings .. ", counted=" .. countedPoints)
@@ -715,29 +724,47 @@ local function removeAvoidedDot(cast, action, school)
     -- A cat's or rogue's white swing missing in that instant looks the same as the finisher missing (in-game
     -- 2026-11-09: a Rip that landed was dropped). A finisher that misses keeps its combo points, one that lands
     -- spends them, so a finisher whose points were read at send is judged again once they've settled.
+    -- Builders (Rake) the other way round: one that lands awards its points (in-game 2026-11-22: Rakes that
+    -- ticked were dropped for a white swing's parry or dodge). At the cap the points can't rise, so a builder
+    -- cast at full points stays dropped (errs low).
     if cast.comboRead then
-        finisherCheck = { cast = cast, dot = dot, replaced = dots[cast.name], action = action, school = school,
-            at = GetTime() + FINISHER_CHECK_DELAY }
+        comboCheck = { cast = cast, dot = dot, replaced = dots[cast.name], action = action, school = school,
+            at = GetTime() + COMBO_CHECK_DELAY }
+    elseif cast.builderRead then
+        if cast.builderRead >= COMBO_CAP then
+            trace(string.format("COMBO after %s's %s: already %d points, can't tell, stays dropped", cast.name,
+                action, cast.builderRead))
+        else
+            comboCheck = { cast = cast, dot = dot, replaced = dots[cast.name], action = action, school = school,
+                at = GetTime() + COMBO_CHECK_DELAY }
+        end
     end
     return true
 end
 
 -- The combo points after a dropped finisher: spent means it landed (the avoid was a white swing), so it's put
 -- back; still there, unreadable, or the target changed (the points belong to the target) leaves it dropped.
--- Unverified in-game that Forever keeps a missed finisher's combo points.
-local function resolveFinisherCheck(now)
-    local check = finisherCheck
+-- After a dropped builder: more than at send means it landed. Unverified in-game that Forever keeps a missed
+-- finisher's combo points.
+local function resolveComboCheck(now)
+    local check = comboCheck
     if not check or now < check.at then return end
-    finisherCheck = nil
+    comboCheck = nil
     local cast = check.cast
     if unitKey("target") ~= cast.key then
         trace("COMBO after " .. cast.name .. "'s " .. check.action .. ": target changed, stays dropped")
         return
     end
     local points, readings = readComboPoints()
-    if not points or points >= cast.comboRead then
-        trace(string.format("COMBO after %s's %s: %s (had %d), it missed", cast.name, check.action, readings,
-            cast.comboRead))
+    local had = cast.comboRead or cast.builderRead
+    local landed
+    if cast.comboRead then
+        landed = points and points < cast.comboRead
+    else
+        landed = points and points > cast.builderRead
+    end
+    if not landed then
+        trace(string.format("COMBO after %s's %s: %s (had %d), it missed", cast.name, check.action, readings, had))
         return
     end
     local dots = dotsByTarget[cast.key]
@@ -745,8 +772,10 @@ local function resolveFinisherCheck(now)
     dotsByTarget[cast.key] = dots or {}
     dotsByTarget[cast.key][cast.name] = check.dot
     check.dot.avoided = nil
-    trace(string.format("COMBO after %s's %s: %s (had %d), spent: it landed, restored", cast.name, check.action,
-        readings, cast.comboRead))
+    if cast.previous and check.dot.stacks then cast.previous.stackedInto = check.dot end
+    if cast.awarded then countedPoints = math.min(COMBO_CAP, countedPoints + cast.awarded) end
+    trace(string.format("COMBO after %s's %s: %s (had %d), %s: it landed, restored", cast.name, check.action,
+        readings, had, cast.comboRead and "spent" or "gained"))
 end
 
 local function onAvoided(key, action, school)
@@ -877,8 +906,11 @@ local function onPlayerCast(spellID, castGUID)
     local key = castTargetKey(castGUID)
     local ok, name, desc = pcall(spellNameAndDescription, spellID)
     if not ok or not name or isSecret(name) then return end
+    local awarded
+    local pointsBefore = builderAtSend
+    builderAtSend = nil
     if type(desc) == "string" and not isSecret(desc) then
-        local awarded = tonumber(desc:match("Awards (%d+) combo point")) or ns.locale.comboPointsAwarded(desc)
+        awarded = tonumber(desc:match("Awards (%d+) combo point")) or ns.locale.comboPointsAwarded(desc)
         if awarded then onBuilderCast(key, awarded) end
         -- Only one Fire trap can be active: any new one (Explosive Trap too) replaces the armed one.
         if armedTrap and desc:find("Fire trap") then armedTrap = nil end
@@ -925,7 +957,8 @@ local function onPlayerCast(spellID, castGUID)
     if previous and stacking then stackOnto(dot, previous, stacking.cap) end
     dotsByTarget[key][name] = dot
     lastDotCast = { key = key, name = name, dot = dot, previous = previous, at = now,
-        comboRead = isFinisher and comboSource == "read" and comboPoints or nil }
+        comboRead = isFinisher and comboSource == "read" and comboPoints or nil,
+        builderRead = awarded and pointsBefore or nil, awarded = awarded }
     dot.name = dot.name or name
     tallyCast(dot, isFinisher and 0 or parseDirectPart(desc)) -- a finisher's point table is no upfront hit
     local learned = tickKey and db.ticks[tickKey]
@@ -1423,7 +1456,7 @@ local function isObservable(key)
 end
 
 local function housekeep(now)
-    resolveFinisherCheck(now)
+    resolveComboCheck(now)
     for key, dots in pairs(dotsByTarget) do
         for name, dot in pairs(dots) do
             local late = (dot.ticksSeen == 0 and dot.travel) or 0

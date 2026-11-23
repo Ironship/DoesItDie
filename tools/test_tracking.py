@@ -100,7 +100,7 @@ function api.reset(waitMode, estimateDuringCast)
     if takeCombatTally then takeCombatTally() end
     db.tickWeights = nil
     db.waitFirstTick = waitMode or "off"
-    lastBuilder, lastDotCast, lastOutcome, armedTrap, finisherCheck = nil, nil, nil, nil, nil
+    lastBuilder, lastDotCast, lastOutcome, armedTrap, comboCheck, builderAtSend = nil, nil, nil, nil, nil, nil
     for k in pairs(sentTargets) do sentTargets[k] = nil end
     db.estimateDuringCast = estimateDuringCast ~= false
     if dropCastInProgress then dropCastInProgress("reset") end
@@ -345,6 +345,36 @@ check("Rip + miss, then tab: stays dropped", sim.markerOn("mob"), "0 dmg")
 sim.reset(); sim.learn("4x2", 21.9); sim.comboAPI(2)
 guid = sim.send(4); sim.comboAPI(0); sim.avoid("MISS", 1); sim.advance(0.05); sim.succeed(4, guid); sim.advance(0.5)
 check("Miss before Rip's cast event, points spent: restored", sim.marker(), "131 dmg from 1 DoT(s)")
+
+# Replay of log 912822.1 (2026-11-22): Rake with 4 readable combo points, a white swing's PARRY just before the
+# cast event. The points went to 5, so the Rake landed (it ticked) and comes back.
+sim.reset(); sim.comboAPI(4)
+guid = sim.send(2); sim.avoid("PARRY", 1); sim.comboAPI(5); sim.advance(0.05); sim.succeed(2, guid)
+check("Rake + white parry before the cast event: dropped at first", sim.marker(), "0 dmg from 0 DoT(s)")
+sim.advance(0.5)
+check("  points gained: Rake restored", sim.marker(), "39 dmg from 1 DoT(s)")
+check("  log says gained", "(had 4), gained: it landed, restored" in sim.log(), True)
+check("  its point counted again", sim.counted(), 1)
+sim.advance(2.45); sim.hiddenHit(1)
+check("  and its first tick matches", "TICK Rake" in sim.log(), True)
+# A dodge right after the cast event, points gained: restored too.
+sim.reset(); sim.comboAPI(2)
+sim.cast(2); sim.comboAPI(3); sim.advance(0.05); sim.avoid("DODGE", 1); sim.advance(0.5)
+check("Rake + white dodge after it, points gained: restored", sim.marker(), "39 dmg from 1 DoT(s)")
+# The Rake itself was dodged: no point, stays dropped.
+sim.reset(); sim.comboAPI(2)
+sim.cast(2); sim.advance(0.05); sim.avoid("DODGE", 1); sim.advance(0.5)
+check("Rake dodged, points unchanged: stays dropped", sim.marker(), "0 dmg from 0 DoT(s)")
+check("  log says it missed", "(had 2), it missed" in sim.log(), True)
+# Already at 5 points (log 912905.2): the points can't say, so it stays dropped (errs low).
+sim.reset(); sim.comboAPI(5)
+sim.cast(2); sim.advance(0.05); sim.avoid("DODGE", 1); sim.advance(0.5)
+check("Rake + dodge at 5 points: stays dropped", sim.marker(), "0 dmg from 0 DoT(s)")
+check("  log says it can't tell", "already 5 points, can't tell" in sim.log(), True)
+# Points unreadable (secret): stays dropped, as before.
+sim.reset()
+sim.cast(2); sim.advance(0.05); sim.avoid("DODGE", 1); sim.advance(0.5)
+check("Rake + dodge, points unreadable: stays dropped", sim.marker(), "0 dmg from 0 DoT(s)")
 
 # Replay of a landed 3-point Rip (log 99200.3): ticks 21,21,20,20 every ~2s, with white hits of the SAME size
 # in between. All four ticks must be matched and no white hit.
