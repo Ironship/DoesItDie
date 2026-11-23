@@ -105,10 +105,13 @@ Consequences for the design:
    still have its DoT come back IMMUNE (bleed-immune mobs), so an IMMUNE later in the window still drops it.
    Unverified in-game that Forever reports that IMMUNE through `UNIT_COMBAT`.
    Finishers (Rip, Rupture) get a second look, since a white swing missing in that instant looks the same: when
-   the combo points were readable at send, they're read again 0.5 s after the drop (`resolveFinisherCheck`, from
+   the combo points were readable at send, they're read again 0.5 s after the drop (`resolveComboCheck`, from
    `housekeep`); spent means the finisher landed and it's put back, still there means it missed. Skipped if the
    target changed (the points are the target's). Unverified in-game that Forever keeps a missed finisher's points
-   (log lines `COMBO after Rip's MISS`).
+   (log lines `COMBO after Rip's MISS`). Builder DoTs (Rake) get the same look the other way round: points read
+   at send, and more points 0.5 s after the drop means it landed (in-game 2026-11-22: Rakes that ticked were
+   dropped for a white swing's parry/dodge). At 5 points they can't rise, so a Rake cast at full points that
+   meets an avoid stays dropped (errs low).
 4. **Ticks:** each `UNIT_COMBAT` hit on the target is matched to at most one DoT: same school, within a tight
    timing window of the DoT's rhythm, and a plausible size (crits 1.3–2.3×). Physical bleeds and melee white hits
    look alike, hence the tight windows. Learned tick sizes are saved per spell (per combo point count for
