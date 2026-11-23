@@ -942,3 +942,4 @@ check("Dead hard target and a same-named soft enemy: the DoT goes on the soft en
 print(f"\n{'all passed' if not failures else str(failures) + ' FAILED'}")
 if failures:
     print("\nlog of last scenario:\n" + sim.log())
+    sys.exit(1)

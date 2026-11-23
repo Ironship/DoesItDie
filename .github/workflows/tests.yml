@@ -1,0 +1,41 @@
+name: Tests
+
+# Runs every tools/test_*.py on pull requests (including ones from forks) and on main.
+# `pull_request` (never `pull_request_target`): a fork's PR runs with a read-only token and no secrets, so a PR that
+# edits this file or the tests can't reach CF_API_KEY or write to the repo.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install lupa
+        run: python -m pip install "lupa==2.8"
+
+      - name: Run tests
+        run: |
+          status=0
+          for t in tools/test_*.py; do
+            echo "::group::$t"
+            if ! python "$t"; then
+              echo "::error::$t failed"
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $status
