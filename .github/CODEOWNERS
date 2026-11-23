@@ -1,0 +1,7 @@
+# Every change needs the owner's review. The lines after the first are listed on their own so they stay owned even
+# if the catch-all is ever narrowed: they control what gets built, released and run.
+*                           @swirllyman
+/.github/                   @swirllyman
+/.pkgmeta                   @swirllyman
+/DoesItDie/DoesItDie.toc    @swirllyman
+/tools/                     @swirllyman

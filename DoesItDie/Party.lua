@@ -333,10 +333,26 @@ end
 -- Events
 ---------------------------------------------------------------------------
 
-local function onMessage(prefix, text, _, sender)
+-- Who's in the group now (names without realm).
+local function groupNames()
+    local names = {}
+    local raid = call(IsInRaid) == true
+    for i = 1, raid and 40 or 4 do
+        local name = baseName(call(UnitName, (raid and "raid" or "party") .. i))
+        if name then names[name] = true end
+    end
+    return names
+end
+
+-- Only group channels count: a whisper or guild message from someone outside the group could otherwise plant DoTs
+-- on the marker (and grow party.remote) until the next roster change.
+local GROUP_CHANNELS = { PARTY = true, RAID = true, INSTANCE_CHAT = true }
+
+local function onMessage(prefix, text, chan, sender)
     if isSecret(prefix) or prefix ~= PREFIX or not enabled() then return end
+    if isSecret(chan) or not GROUP_CHANNELS[chan] then return end
     local who = baseName(sender)
-    if not who or who == myName() then return end
+    if not who or who == myName() or not groupNames()[who] then return end
     local kind, payload = party.decode(text)
     if not kind then return end
     local now = GetTime()
@@ -350,17 +366,6 @@ local function onMessage(prefix, text, _, sender)
         store(who, payload.guid, payload.dots, now)
         trace(string.format("PARTY recv from %s: %s", who, text))
     end
-end
-
--- Who's in the group now (names without realm).
-local function groupNames()
-    local names = {}
-    local raid = call(IsInRaid) == true
-    for i = 1, raid and 40 or 4 do
-        local name = baseName(call(UnitName, (raid and "raid" or "party") .. i))
-        if name then names[name] = true end
-    end
-    return names
 end
 
 local function onRoster()
