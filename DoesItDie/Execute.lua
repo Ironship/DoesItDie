@@ -102,12 +102,24 @@ local function updateAbility()
     ns.trace(string.format("EXEC watching %s (%d)", ability.name, id))
 end
 
+-- Strip thousands separators ("1,020", "1.020", "1 020", "1\194\160020") while leaving decimals ("2.0") intact.
+local function plainNumbers(desc)
+    for _ = 1, 2 do
+        desc = desc:gsub("(%d),(%d%d%d)%f[^%d]", "%1%2")
+        desc = desc:gsub("(%d)%.(%d%d%d)%f[^%d]", "%1%2")
+        desc = desc:gsub("(%d)\194\160(%d%d%d)%f[^%d]", "%1%2")
+        desc = desc:gsub("(%d) (%d%d%d)%f[^%d]", "%1%2")
+    end
+    return desc
+end
+
 -- A tooltip's hit: low end, high end, damage per extra rage/energy point (Execute, Ferocious Bite). Finishers
 -- ("1 point : 122-162 damage" ... "5 points: 490-530 damage") take the row for `points` (clamped to the table;
 -- nil = 1). English first; in other languages the first number (percentages left out) is the low end and a
 -- number right after it the high end.
 local function parseHit(desc, points)
     if type(desc) ~= "string" or isSecret(desc) then return nil end
+    desc = plainNumbers(desc)
     local perPower = desc:match("each extra point of %a+ into (%d+%.?%d*)")
     local rows, highest = {}, 0
     for n, rowLow, rowHigh in desc:gmatch("(%d+)[^%d\n]-:%s*(%d+)%s*%-%s*(%d+)") do
@@ -216,7 +228,7 @@ local function onCastSucceeded(castGUID, spellID)
     -- The meter's total would have damage in it this cast's expected hit doesn't.
     if perPower > 0 and not extra then
         t.unclear = POWER_NAMES[ability.info.power] .. " wasn't readable at a cast"
-    elseif finisher and not (sent and sent.pointsRead) then
+    elseif finisher and not (sent and sent.pointsRead and sent.points and sent.points > 0) then
         t.unclear = "combo points weren't readable at a cast (counted ones can be too few)"
     end
     t.expected = t.expected + (low + high) / 2 + perPower * (extra or 0)
