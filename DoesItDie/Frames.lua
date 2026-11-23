@@ -110,6 +110,38 @@ function ns.framePath(region)
     end
 end
 
+-- Blizzard's modern unit frames keep overlay StatusBars beside the health bar inside the same container
+-- (TempMaxHealthLoss, absorb and heal prediction bars). They aren't where health is drawn and are often
+-- invisible, but Pick found them first (the smallest StatusBar under the mouse), so a marker on one never showed.
+local OVERLAY_BARS = { "tempmaxhealthloss", "absorb", "prediction" }
+
+function ns.isOverlayBar(bar)
+    if type(bar) ~= "table" then return false end
+    for _, source in ipairs({ plain(bar, "GetParentKey") or false, plain(bar, "GetName") or false }) do
+        if type(source) == "string" then
+            source = source:lower()
+            for _, word in ipairs(OVERLAY_BARS) do
+                if source:find(word, 1, true) then return true end
+            end
+        end
+    end
+    return false
+end
+
+-- The sibling health bar for one of those overlay bars (so a path saved from an earlier pick keeps working),
+-- else `bar`.
+function ns.healthBarOf(bar)
+    if type(bar) ~= "table" or not ns.isOverlayBar(bar) then return bar end
+    local parent = plain(bar, "GetParent")
+    if type(parent) ~= "table" then return bar end
+    local ok, real = pcall(function() return parent.HealthBar or parent.healthBar or parent.Health end)
+    if ok and type(real) == "table" and real ~= bar and plain(real, "GetObjectType") == "StatusBar"
+        and not ns.isOverlayBar(real) then
+        return real
+    end
+    return bar
+end
+
 -- For layering, stop at the owning unit button when a unit is supplied. Frameworks such as ElvUI parent
 -- all unit frames under shared hiders/UI roots: scanning that whole tree every second visits unrelated
 -- frames and lets their strata/levels affect our marker. Without a unit, keep the top-level root for Pick.
@@ -234,7 +266,7 @@ local function findCandidate(kind)
     local root = ns.frameRoot(focus)
     local best, bestArea
     local function consider(region, isBar)
-        if kind == "bar" and not isBar then return end
+        if kind == "bar" and (not isBar or ns.isOverlayBar(region)) then return end
         local width, height = areaUnderMouse(region)
         if not width then return end
         if kind == "anchor" and (width < MIN_ANCHOR_SIZE or height < MIN_ANCHOR_SIZE) then return end

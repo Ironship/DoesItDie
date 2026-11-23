@@ -620,6 +620,12 @@ BITE = ("Finishing move that causes damage per combo point and converts each ext
 check("Ferocious Bite at 3 points", list(ex.parseHit(BITE, 3)), [306, 346, 2])
 check("  at 7 points: the top row", list(ex.parseHit(BITE, 7)), [490, 530, 2])
 check("  points unknown: the first row", list(ex.parseHit(BITE)), [122, 162, 2])
+# Thousands separators in execute and finisher tooltips (English, German, Russian).
+check("parseHit: English range with commas", list(ex.parseHit("Inflicts 1,100 to 1,240 Shadow damage.")), [1100, 1240, 0])
+check("parseHit: English single hit with comma", list(ex.parseHit("Causing 1,050 damage and converting each extra point of rage into 15.5 additional damage.")), [1050, 1050, 15.5])
+check("parseHit: finisher row with commas", list(ex.parseHit("1 point : 200-240 damage\n5 points: 1,020-1,140 damage", 5)), [1020, 1140, 0])
+check("parseHit: German dots", list(ex.parseHit("Verursacht 1.050 bis 1.200 Schattenschaden.")), [1050, 1200, 0])
+check("parseHit: Russian NBSP thousands", list(ex.parseHit("Наносит 1\u00a0050–1\u00a0150 ед. урона.")), [1050, 1150, 0])
 lua.execute("""
     playerClass = "DRUID"
     function IsPlayerSpell(id) return id == 22828 end
@@ -649,9 +655,21 @@ lua.execute("""
     C_NamePlate.GetNamePlateForUnit = function(unit) if unit ~= "target" then return getPlate(unit) end end
 """)
 G.targetHealth = 1000
+# Cache 4 combo points via UNIT_POWER_FREQUENT, then drop API reading to 0: API 0 must beat the stale cache.
+H.fire("UNIT_POWER_FREQUENT", "player", "COMBO_POINTS")
 G.comboPoints = 0
+check("  API 0 beats stale cached combo points", list(ns.currentComboPoints()), [0, "read"])
 check("  no combo points: no estimate", estimate(), None)
+# A finisher cast sent when API already reports 0 points must not learn against the 1-point row.
+G.combat = True
+H.fire("UNIT_SPELLCAST_SENT", "player", "", "fb-zero", 22828)
+H.fire("UNIT_SPELLCAST_SUCCEEDED", "player", "fb-zero", 22828)
+G.combat = False
+check("  Bite sent at 0 read points isn't learned against 1-point row",
+      ex.learn(lua.table_from([lua.table_from({"spellID": 22828, "totalAmount": 700})]), ex.takeTally()), 0)
 lua.execute("GetComboPoints = function() return nil end")
+# Stale cache still helps when API is unreadable (secret), and clears on target change.
+H.fire("PLAYER_TARGET_CHANGED")
 check("  points unreadable, none counted: 1 point's row", estimate(), 122 + 80)
 
 
@@ -670,6 +688,15 @@ check("  log says why", any("combo points weren't readable" in l for l in exec_l
 # 5 points read, 40 extra energy: 510 + 80 = 590 expected; 700 with 20% crits at 2x is 583.3 a hit.
 check("Bite with readable points learns", bite_fight(True), 1)
 check("  ratio", G.DoesItDieDB.execRatios[22828].ratio, round(700 / 1.2 / 590, 3))
+# Options' "Reset learned tick sizes" (ns.resetLearnedTicks) clears execute ratios and active DoT snapshots too.
+lua.execute("DoesItDieDB.ticks[172] = 25")
+G.targetGuid = "Creature-0-1-2-3-3099-000099"
+H.fire("PLAYER_TARGET_CHANGED")
+H.fire("UNIT_SPELLCAST_SUCCEEDED", "player", "cast-reset", 172)
+check("  untouched Corruption uses learned 25/tick (100 dmg)", ns.tracking.targetRemainingDamage()[0], 100)
+step("/did reset drops active snapshot and execute ratios", lambda: G.SlashCmdList.DOESITDIE("reset"))
+check("  active DoT falls back to description (40 dmg)", ns.tracking.targetRemainingDamage()[0], 40)
+check("  execute ratio cleared", G.DoesItDieDB.execRatios[22828], None)
 lua.execute("GetComboPoints = nil")
 
 lua.execute("function UnitHealth() return 100 end; playerClass = 'MAGE'")
@@ -1428,6 +1455,39 @@ lua.execute("""
 check("  secret unit attribute is skipped",
       same(ns.frameRoot(G.ElvUF_Target.Health, "target"), G.ElvUF_Target), True)
 lua.execute("issecretvalue = nil")
+
+# Hidden Edit Mode selection frame (HIGH/1000) under target frame must not pull the marker into its strata/level.
+lua.execute("""
+    local sel = CreateFrame("Frame", nil, ElvUF_Target)
+    sel:SetFrameStrata("HIGH")
+    sel:SetFrameLevel(1000)
+    sel:Hide()
+    function sel:GetChildren() layerVisits = layerVisits + 1 return unpack(self.children) end
+""")
+G.targetGuid = "Creature-0-1-2-3-3099-000001"
+H.fire("PLAYER_TARGET_CHANGED")
+H.fire("UNIT_SPELLCAST_SUCCEEDED", "player", "cast-E2", 172)
+H.update(1.1)
+check("  hidden selection frame doesn't pull marker to HIGH/1000",
+      (G.DoesItDieRemaining.strata, G.DoesItDieRemaining.level), ("MEDIUM", 41))
+
+# Overlay StatusBars (TempMaxHealthLoss, absorb, prediction) are ignored by Pick and redirected to HealthBar.
+lua.execute("""
+    local holder = CreateFrame("Frame", "CamelotBarsHolder", UIParent)
+    local realBar = CreateFrame("StatusBar", nil, holder)
+    local lossBar = CreateFrame("StatusBar", nil, holder)
+    function realBar:GetParentKey() return "HealthBar" end
+    function lossBar:GetParentKey() return "TempMaxHealthLoss" end
+    holder.HealthBar = realBar
+    holder.TempMaxHealthLoss = lossBar
+    DoesItDieDB.customHealthBar = "CamelotBarsHolder.TempMaxHealthLoss"
+""")
+check("  isOverlayBar flags TempMaxHealthLoss, not HealthBar",
+      (ns.isOverlayBar(G.CamelotBarsHolder.TempMaxHealthLoss), ns.isOverlayBar(G.CamelotBarsHolder.HealthBar)),
+      (True, False))
+check("  healthBarOf redirects saved TempMaxHealthLoss to sibling HealthBar",
+      same(ns.healthBarOf(G.CamelotBarsHolder.TempMaxHealthLoss), G.CamelotBarsHolder.HealthBar), True)
+lua.execute('DoesItDieDB.customHealthBar = "ElvUF_Target.Health"')
 
 
 # Party DoTs (Party.lua, issue #25): a party member's message adds to the target's total and the API's list, only
