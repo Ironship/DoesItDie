@@ -681,6 +681,12 @@ H.fire("UNIT_POWER_FREQUENT", "player", "COMBO_POINTS")
 G.comboPoints = 0
 check("  API 0 beats stale cached combo points", list(ns.currentComboPoints()), [0, "read"])
 check("  no combo points: no estimate", estimate(), None)
+check("  and /did exec says it's the combo points, not the tooltip", "no combo points" in str(ns.execute.estimate()[1]), True)
+G.biteText = "Finishing move."
+G.comboPoints = 3
+check("  unreadable tooltip: /did exec shows what came back", "\"Finishing move.\"" in str(ns.execute.estimate()[1]), True)
+G.biteText = BITE
+G.comboPoints = 0
 # A finisher cast sent when API already reports 0 points must not learn against the 1-point row.
 G.combat = True
 H.fire("UNIT_SPELLCAST_SENT", "player", "", "fb-zero", 22828)

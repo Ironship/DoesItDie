@@ -239,10 +239,18 @@ local function estimate()
     local info, points = ability.info, nil
     if info.finisher then
         points = comboPoints()
-        if points <= 0 then return nil end -- read as none: nothing to finish with
+        if points <= 0 then -- read as none: nothing to finish with
+            return nil, string.format(T("%s: no combo points, so no icon."), ability.name)
+        end
     end
     local low, _, perPower = hitOf(ability.spellID, points)
-    if not low then return nil end
+    if not low then
+        local desc = C_Spell and C_Spell.GetSpellDescription and select(2, pcall(C_Spell.GetSpellDescription, ability.spellID))
+        if C_Spell and C_Spell.RequestLoadSpellData then pcall(C_Spell.RequestLoadSpellData, ability.spellID) end
+        local shown = desc == nil and "nil" or isSecret(desc) and "secret" or string.format("%q", tostring(desc):sub(1, 160))
+        return nil, string.format(T("%s: its tooltip has no damage number this addon can read."), ability.name)
+            .. string.format(" (%d: %s)", ability.spellID, shown)
+    end
     local extra = perPower > 0 and extraPower(ability.spellID, info) or 0
     local ratio = learnedRatio(ability.spellID)
     local hit = (low + perPower * (extra or 0)) * ratio
@@ -603,7 +611,7 @@ function ns.executeCommand()
         return
     end
     local hit, how = estimate()
-    ns.print(how or string.format(T("%s: its tooltip has no damage number this addon can read."), ability.name))
+    ns.print(how or T("No estimate."))
     if not db.execShow then ns.print(T("The execute icon is switched off (options, Kill icon tab).")) end
     testUntil = GetTime() + 5
     ns.trace("EXEC test: " .. tostring(how))
