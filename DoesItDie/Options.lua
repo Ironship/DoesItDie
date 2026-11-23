@@ -11,7 +11,7 @@ local ADDON_NAME, ns = ...
 local T = ns.locale.T -- the window's text in the window language (Locale.lua)
 
 local WHITE = "Interface\\Buttons\\WHITE8X8"
--- Tall enough for the longest tabs (Nameplates, Focus: 15 rows); wide enough for the seven tab names in a row.
+-- Wide enough for the seven tab names in a row. Tabs taller than the settings area scroll (addTab).
 local WINDOW_WIDTH, WINDOW_HEIGHT = 800, 548
 local HEADER_HEIGHT = 52 -- title bar: title, presets, close button
 local PREVIEW_WIDTH = 290
@@ -224,7 +224,8 @@ local function makeRow(parent, labelText, opts)
         local enabled = not self.enabledIf or self.enabledIf(db())
         self:SetAlpha(enabled and 1 or DISABLED_ALPHA)
         widget:EnableMouse(enabled)
-        if widget.EnableMouseWheel then widget:EnableMouseWheel(enabled) end
+        -- Only widgets that use the wheel (sliders): enabling it on the others would stop the tab's scrolling there.
+        if widget.EnableMouseWheel and widget:GetScript("OnMouseWheel") then widget:EnableMouseWheel(enabled) end
     end
     table.insert(controls, row)
     return row
@@ -279,7 +280,11 @@ local function sliderRow(parent, labelText, min, max, step, get, set, opts)
         valueText:SetText(value .. suffix)
         set(value)
     end)
-    slider:SetScript("OnMouseWheel", function(self, delta) self:SetValue(self:GetValue() + delta * step) end)
+    slider:SetScript("OnMouseWheel", function(self, delta)
+        -- On a tab that scrolls, the wheel scrolls the tab: scrolling past a slider mustn't change it.
+        if parent.scrollWheel and parent.scrollWheel(delta) then return end
+        self:SetValue(self:GetValue() + delta * step)
+    end)
     function row:Refresh()
         updating = true
         local value = get()
@@ -756,21 +761,87 @@ local function selectTab(tab)
     activeTab = tab
     for _, other in ipairs(tabs) do
         local selected = other == tab
-        other.content:SetShown(selected)
+        other.scroll:SetShown(selected)
         other.button.text:SetTextColor(selected and 1 or 0.6, selected and 0.82 or 0.6, selected and 0 or 0.6)
         other.button.underline:SetShown(selected)
         if other.footer then other.footer:SetShown(selected) end
     end
 end
 
+-- The settings area's tab page: below the tab buttons, above the footer buttons (Reset this tab, Copy from ...).
+local SCROLLBAR_WIDTH = 6
+local SCROLL_STEP = ROW_HEIGHT * 2
+
+-- A scrolling page for a tab: tab.scroll is shown and hidden, rows go on tab.content (its scroll child). The
+-- scrollbar (a plain Slider, like the other controls) only shows when the rows don't fit; the wheel scrolls
+-- anywhere on the page, sliders included (see sliderRow).
+local function addScrollPage(tab, area)
+    local scroll = CreateFrame("ScrollFrame", nil, area)
+    scroll:SetPoint("TOPLEFT", area, "TOPLEFT", 8, -40)
+    scroll:SetPoint("BOTTOMRIGHT", area, "BOTTOMRIGHT", -8, 40)
+    scroll:Hide()
+    local content = CreateFrame("Frame", nil, scroll)
+    -- The area's width from the window's (its anchors may not be resolved yet when the rows are placed).
+    content:SetSize(WINDOW_WIDTH - PREVIEW_WIDTH - 30 - 16, 1)
+    scroll:SetScrollChild(content)
+
+    local bar = CreateFrame("Slider", nil, scroll)
+    bar:SetOrientation("VERTICAL")
+    bar:SetWidth(SCROLLBAR_WIDTH)
+    bar:SetPoint("TOPRIGHT", scroll, "TOPRIGHT", 0, 0)
+    bar:SetPoint("BOTTOMRIGHT", scroll, "BOTTOMRIGHT", 0, 0)
+    local track = bar:CreateTexture(nil, "BACKGROUND")
+    track:SetAllPoints()
+    track:SetColorTexture(0.2, 0.2, 0.22, 1)
+    bar:SetThumbTexture(WHITE)
+    local thumb = bar:GetThumbTexture()
+    thumb:SetVertexColor(0.55, 0.55, 0.58, 1)
+    bar:SetMinMaxValues(0, 0)
+    bar:SetValue(0)
+    bar:Hide()
+
+    local function range()
+        local visible = scroll:GetHeight() or 0
+        if visible <= 0 then return 0 end
+        return math.max(0, (content:GetHeight() or 0) - visible)
+    end
+    local function scrollTo(offset)
+        local max = range()
+        offset = math.max(0, math.min(max, offset or 0))
+        closeMenu() -- the dropdown hangs under its row, which is moving
+        scroll:SetVerticalScroll(offset)
+        if bar:GetValue() ~= offset then bar:SetValue(offset) end
+    end
+    local function layout()
+        local max, visible = range(), scroll:GetHeight() or 0
+        bar:SetMinMaxValues(0, max)
+        bar:SetShown(max > 0)
+        if max > 0 then
+            thumb:SetSize(SCROLLBAR_WIDTH, math.max(24, visible * visible / (visible + max)))
+        end
+        scrollTo(scroll:GetVerticalScroll() or 0)
+    end
+    bar:SetScript("OnValueChanged", function(_, value)
+        if (scroll:GetVerticalScroll() or 0) ~= value then scrollTo(value) end
+    end)
+    -- Returns whether the page took the wheel (it does whenever it can scroll at all).
+    content.scrollWheel = function(delta)
+        if range() <= 0 then return false end
+        scrollTo((scroll:GetVerticalScroll() or 0) - delta * SCROLL_STEP)
+        return true
+    end
+    scroll:EnableMouseWheel(true)
+    scroll:SetScript("OnMouseWheel", function(_, delta) content.scrollWheel(delta) end)
+    scroll:SetScript("OnSizeChanged", layout)
+    scroll:SetScript("OnShow", layout)
+    tab.scroll, tab.content, tab.layoutScroll = scroll, content, layout
+end
+
 -- A tab whose methods add rows top to bottom and remember the setting keys, for "Reset this tab".
 local function addTab(name)
     local area = window.settingsArea
     local tab = { keys = {}, y = 0 }
-    tab.content = CreateFrame("Frame", nil, area)
-    tab.content:SetPoint("TOPLEFT", area, "TOPLEFT", 8, -40)
-    tab.content:SetPoint("BOTTOMRIGHT", area, "BOTTOMRIGHT", -8, 40)
-    tab.content:Hide()
+    addScrollPage(tab, area)
 
     local button = CreateFrame("Button", nil, area)
     button.text = button:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -795,6 +866,7 @@ local function addTab(name)
     local function place(row, key)
         row:SetPoint("TOPLEFT", tab.content, "TOPLEFT", 0, -tab.y)
         tab.y = tab.y + ROW_HEIGHT
+        tab.content:SetHeight(tab.y + 4)
         if key then table.insert(tab.keys, key) end
         return row
     end

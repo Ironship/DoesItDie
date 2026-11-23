@@ -282,6 +282,50 @@ step("display loop with the window's preview", lambda: H.update(0.2))
 for tab in ("Kill icon", "Marker", "Effects", "Text", "Nameplates", "Focus", "Advanced"):
     step(f"open tab {tab}", lambda tab=tab: H.clickText(tab))
 
+# Tab pages scroll when their rows don't fit (the Nameplates and Focus tabs used to run into the footer buttons).
+# The mock has no layout, so the page is given the real settings area's height: 548 window - 52 header - 10 margin,
+# minus 40 for the tab buttons and 40 for the footer.
+SCROLL_TEST = lua.eval("""function(frames, label, visible)
+    local page
+    for _, f in ipairs(frames) do
+        if f.kind == "ScrollFrame" and f.shown then page = f end
+    end
+    if not page then return "no page" end
+    local content
+    for _, c in ipairs(page.children) do if c.scrollWheel then content = c end end
+    local bar
+    for _, c in ipairs(page.children) do if c.kind == "Slider" then bar = c end end
+    local offset = 0
+    page.SetVerticalScroll = function(_, v) offset = v end
+    page.GetVerticalScroll = function() return offset end
+    page.height = visible
+    page.scripts.OnShow(page)
+    local fits = content.height <= visible
+    -- A slider on the page: the wheel over it scrolls the page when the page scrolls.
+    local slider
+    for _, row in ipairs(content.children) do
+        for _, c in ipairs(row.children) do if c.kind == "Slider" and not slider then slider = c end end
+    end
+    local before = slider and slider:GetValue()
+    page.scripts.OnMouseWheel(page, -1)
+    local scrolled = offset
+    if slider then slider.scripts.OnMouseWheel(slider, -1) end
+    local sliderMoved = slider and slider:GetValue() ~= before
+    page.scripts.OnMouseWheel(page, -100)
+    local atEnd = offset
+    page.scripts.OnMouseWheel(page, 100)
+    return string.format("fits=%s bar=%s scrolled=%s sliderMoved=%s end=%s back=%s", tostring(fits),
+        tostring(bar.shown), tostring(scrolled > 0), tostring(sliderMoved),
+        tostring(atEnd == math.max(0, content.height - visible)), tostring(offset == 0))
+end""")
+for tab, fits in (("Kill icon", True), ("Marker", True), ("Effects", True), ("Text", True), ("Nameplates", False),
+                  ("Focus", False), ("Advanced", True)):
+    H.clickText(tab)
+    want = ("fits=true bar=false scrolled=false sliderMoved=%s end=true back=true"
+            % ("nil" if tab == "Advanced" else "true") if fits else
+            "fits=false bar=true scrolled=true sliderMoved=false end=true back=true")
+    check(f"  {tab} tab page {'fits' if fits else 'scrolls'}", SCROLL_TEST(G.frames, tab, 548 - 52 - 10 - 80), want)
+
 
 def copy_marker_look():
     H.clickText("Nameplates")
