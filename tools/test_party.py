@@ -227,6 +227,11 @@ receive(G, f"M;1;{GUID2};6222:32:999:1:4:3", sender=G.SECRET)
 check("a secret sender is ignored", entries(G, GUID2), [])
 G.fire("CHAT_MSG_ADDON", "OtherAddon", f"M;1;{GUID2};6222:32:999:1:4:3", "PARTY", "Warlock")
 check("other prefixes are ignored", entries(G, GUID2), [])
+G.fire("CHAT_MSG_ADDON", "DoesItDie", f"M;1;{GUID2};6222:32:999:1:4:3", "WHISPER", "Warlock")
+G.fire("CHAT_MSG_ADDON", "DoesItDie", f"M;1;{GUID2};6222:32:999:1:4:3", "GUILD", "Warlock")
+check("whispers and guild messages are ignored, even from a party member", entries(G, GUID2), [])
+receive(G, f"M;1;{GUID2};6222:32:999:1:4:3", sender="Stranger-Realm")
+check("a sender outside the group is ignored", entries(G, GUID2), [])
 
 G.ns.db.partyDots = False
 check("option off: nothing added", entries(G, GUID), [])
