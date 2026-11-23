@@ -968,3 +968,4 @@ check("  next tick is 9.0, 5 ticks left at 2 stacks (40 dmg, not 48)", sim.marke
 print(f"\n{'all passed' if not failures else str(failures) + ' FAILED'}")
 if failures:
     print("\nlog of last scenario:\n" + sim.log())
+    sys.exit(1)

@@ -16,3 +16,4 @@ ignore:
     - README.md
     - CLAUDE.md
     - API.md
+    - CONTRIBUTING.md
