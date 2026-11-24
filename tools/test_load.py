@@ -100,6 +100,17 @@ function methods.RegisterUnitEvent(self, e) self.events = self.events or {}; sel
 function methods.GetDebugName(self) return self.name or "mock" end
 function methods.GetName(self) return self.name end
 function methods.GetParent(self) return self.parent end
+function methods.SetParent(self, parent)
+    if self.parent and type(self.parent) == "table" and self.parent.children then
+        for i, child in ipairs(self.parent.children) do
+            if child == self then table.remove(self.parent.children, i); break end
+        end
+    end
+    self.parent = parent
+    if parent and type(parent) == "table" and parent.children then
+        table.insert(parent.children, self)
+    end
+end
 function methods.SetAllPoints(self, target) self.allPoints = target end
 
 function CreateFrame(kind, name, parent, template)
@@ -1576,6 +1587,172 @@ check("Marker tab has the party rows", lua.eval("""function(frames)
     return found >= 2
 end""")(G.frames), True)
 G.targetGuid = None
+
+
+# Target & focus marker parenting and layering on Forever:
+# - Markers hang directly on healthBar out of combat (so LOW-strata UIParent issues don't hide them) and return
+#   to UIParent during options preview.
+# - Secret strata/level, gamepad UI, or combat lockdown fallback raises the marker/skull to HIGH (+1000).
+# - The 300-frame walk cap still considers healthBar and unwrapped Texture portraits, and throwing children
+#   do not abort the scan.
+G.targetGuid = "Creature-0-1-2-3-3099-000001"
+H.fire("PLAYER_TARGET_CHANGED")
+H.fire("UNIT_SPELLCAST_SUCCEEDED", "player", "cast-P1", 172)
+step("target marker hangs on healthBar out of combat", lambda: [H.update(1.1) for _ in range(3)])
+check("  parent is ElvUF_Target.Health", same(G.DoesItDieRemaining.parent, G.ElvUF_Target.Health), True)
+check("  layer stays pinned above portrait across ticks", (G.DoesItDieRemaining.strata, G.DoesItDieRemaining.level), ("MEDIUM", 41))
+
+step("options preview moves target marker back to UIParent", lambda: (G.SlashCmdList.DOESITDIE(""), H.update(0.2)))
+check("  preview parent is UIParent", same(G.DoesItDieRemaining.parent, G.UIParent), True)
+check("  preview strata is FULLSCREEN", G.DoesItDieRemaining.strata, "FULLSCREEN")
+
+step("closing options returns target marker to healthBar", lambda: (G.DoesItDieOptions.Hide(G.DoesItDieOptions), H.update(1.1)))
+check("  restored parent is ElvUF_Target.Health", same(G.DoesItDieRemaining.parent, G.ElvUF_Target.Health), True)
+check("  restored layer is MEDIUM/41", (G.DoesItDieRemaining.strata, G.DoesItDieRemaining.level), ("MEDIUM", 41))
+
+# Mid-combat attach when marker starts on UIParent: fallback floor while locked in combat, then drops on leave.
+G.DoesItDieDB.customHealthBar = "Missing.Bar"
+G.DoesItDieDB.customIconAnchor = ""
+step("detach to missing bar out of combat", lambda: (ns.reattach(), H.update(1.1)))
+check("  detached marker sits on UIParent", same(G.DoesItDieRemaining.parent, G.UIParent), True)
+G.combat = True
+G.DoesItDieDB.customHealthBar = "ElvUF_Target.Health"
+step("attach to ElvUF_Target.Health during combat lockdown", lambda: (
+    ns.reattach(), H.fire("UNIT_SPELLCAST_SUCCEEDED", "player", "cast-P2", 172), H.update(1.1)))
+check("  combat lockdown keeps marker on UIParent", same(G.DoesItDieRemaining.parent, G.UIParent), True)
+check("  fallback floor lifts stuck marker to HIGH",
+      (G.DoesItDieRemaining.strata, G.DoesItDieRemaining.level >= 1041), ("HIGH", True))
+G.combat = False
+step("leave combat so recheckAttach reparents onto healthBar", lambda: H.update(1.1))
+check("  reparented onto ElvUF_Target.Health", same(G.DoesItDieRemaining.parent, G.ElvUF_Target.Health), True)
+check("  layer returns to MEDIUM/41", (G.DoesItDieRemaining.strata, G.DoesItDieRemaining.level), ("MEDIUM", 41))
+
+# Secret strata/level on a visible child and gamepad UI both trigger the fallback floor (hidden secret child does not).
+lua.execute("""
+    function issecretvalue(v) return v == SECRET end
+    SecretChildFrame = CreateFrame("Frame", nil, ElvUF_Target)
+    function SecretChildFrame:GetFrameStrata() return SECRET end
+    function SecretChildFrame:GetFrameLevel() return SECRET end
+""")
+step("visible child with secret strata/level", lambda: (
+    H.fire("UNIT_SPELLCAST_SUCCEEDED", "player", "cast-P3", 172), H.update(1.1)))
+check("  target marker uses HIGH fallback",
+      (G.DoesItDieRemaining.strata, G.DoesItDieRemaining.level >= 1041), ("HIGH", True))
+check("  kill icon uses HIGH >= 2000 fallback",
+      (G.DoesItDieSkull.strata, G.DoesItDieSkull.level >= 2000), ("HIGH", True))
+lua.execute("SecretChildFrame:Hide()")
+step("hiding secret child drops back to exact target layer", lambda: H.update(1.1))
+check("  back to MEDIUM/41", (G.DoesItDieRemaining.strata, G.DoesItDieRemaining.level), ("MEDIUM", 41))
+lua.execute("IsUsingGamepad = function() return true end")
+step("gamepad UI active", lambda: H.update(1.1))
+check("  marker uses HIGH fallback under gamepad UI",
+      (G.DoesItDieRemaining.strata, G.DoesItDieRemaining.level >= 1041), ("HIGH", True))
+check("  skull uses HIGH >= 2000 under gamepad UI",
+      (G.DoesItDieSkull.strata, G.DoesItDieSkull.level >= 2000), ("HIGH", True))
+lua.execute("IsUsingGamepad = nil; issecretvalue = nil")
+step("gamepad UI off again", lambda: H.update(1.1))
+check("  back to MEDIUM/41", (G.DoesItDieRemaining.strata, G.DoesItDieRemaining.level), ("MEDIUM", 41))
+
+# Capped walk (>300 siblings) and throwing child GetChildren/GetFrameStrata still cover healthBar and Texture portrait.
+lua.execute("""
+    local capped = CreateFrame("Button", "CappedTargetFrame", UIParent)
+    capped:SetFrameStrata("LOW")
+    capped:SetFrameLevel(2)
+    function capped:GetAttribute(k) if k == "unit" then return "target" end end
+    function capped:GetChildren() return unpack(self.children) end
+    local kids = {}
+    for i = 1, 320 do
+        local c = CreateFrame("Frame", nil, capped)
+        c:SetFrameStrata("LOW")
+        c:SetFrameLevel(1)
+        kids[#kids + 1] = c
+    end
+    local badChildren = CreateFrame("Frame", nil, capped)
+    badChildren:SetFrameStrata("LOW")
+    badChildren:SetFrameLevel(1)
+    function badChildren:GetChildren() error("children boom") end
+    local bar = CreateFrame("StatusBar", nil, capped)
+    bar:SetFrameStrata("MEDIUM")
+    bar:SetFrameLevel(50)
+    capped.Health = bar
+    local portraitHost = CreateFrame("Frame", nil, capped)
+    portraitHost:SetFrameStrata("MEDIUM")
+    portraitHost:SetFrameLevel(55)
+    capped.Portrait = portraitHost:CreateTexture()
+    DoesItDieDB.customHealthBar = "CappedTargetFrame.Health"
+    DoesItDieDB.customIconAnchor = "CappedTargetFrame.Portrait"
+""")
+step("capped tree with throwing GetChildren still reaches Health and Texture portrait parent", lambda: (
+    ns.reattach(), H.fire("UNIT_SPELLCAST_SUCCEEDED", "player", "cast-P4", 172), H.update(1.1)))
+check("  marker placed above unwrapped portrait parent (MEDIUM/56)",
+      (G.DoesItDieRemaining.strata, G.DoesItDieRemaining.level), ("MEDIUM", 56))
+lua.execute("""
+    DoesItDieDB.customHealthBar = "ElvUF_Target.Health"
+    DoesItDieDB.customIconAnchor = ""
+    local badStrata = CreateFrame("Frame", nil, ElvUF_Target)
+    function badStrata:GetFrameStrata() error("strata boom") end
+    BadStrataChild = badStrata
+""")
+step("throwing child GetFrameStrata does not error and triggers fallback floor", lambda: (
+    ns.reattach(), H.update(1.1)))
+check("  marker uses HIGH fallback on unreadable child strata",
+      (G.DoesItDieRemaining.strata, G.DoesItDieRemaining.level >= 1041), ("HIGH", True))
+lua.execute("BadStrataChild:Hide()")
+
+# Focus marker reparents onto the focus bar out of combat, skips itself, and uses fallback floor on secret child.
+lua.execute("""
+    EllesmereUIUnitFrames_Focus = nil
+    focusGuid = "Creature-0-1-2-3-3099-0000F1"
+    savedFocusUnitName = UnitName
+    function UnitName(unit) if unit == "focus" and focusGuid then return "FocusMob" end return savedFocusUnitName(unit) end
+    function FocusFrame:GetChildren() return unpack(self.children) end
+""")
+step("focus marker hangs on BlizzardFocusBar out of combat", lambda: (
+    H.fire("UNIT_SPELLCAST_SENT", "player", "FocusMob", "cast-FP1", 172),
+    H.fire("UNIT_SPELLCAST_SUCCEEDED", "player", "cast-FP1", 172),
+    H.update(1.1)))
+focus_markers_p = markers_on(G.BlizzardFocusBar)
+check("  focus marker parent is BlizzardFocusBar",
+      same(focus_markers_p[0].parent, G.BlizzardFocusBar) if focus_markers_p else None, True)
+check("  focus marker layer stays at MEDIUM/1006",
+      (focus_markers_p[0].strata, focus_markers_p[0].level) if focus_markers_p else None, ("MEDIUM", 1006))
+
+lua.execute("""
+    function issecretvalue(v) return v == SECRET end
+    FocusSecretChild = CreateFrame("Frame", nil, FocusFrame)
+    function FocusSecretChild:GetFrameStrata() return SECRET end
+    function FocusSecretChild:GetFrameLevel() return SECRET end
+""")
+step("focus visible child with secret strata triggers HIGH fallback", lambda: H.update(1.1))
+check("  focus marker lifted to HIGH >= 2006",
+      (focus_markers_p[0].strata, focus_markers_p[0].level >= 2006) if focus_markers_p else None, ("HIGH", True))
+lua.execute("FocusSecretChild:Hide(); issecretvalue = nil")
+step("hiding focus secret child drops back to MEDIUM/1006", lambda: H.update(1.1))
+check("  focus marker back to MEDIUM/1006",
+      (focus_markers_p[0].strata, focus_markers_p[0].level) if focus_markers_p else None, ("MEDIUM", 1006))
+
+# Mid-combat focus bar swap keeps marker on previous bar with fallback floor, then reparents after combat.
+G.combat = True
+lua.execute("""
+    BBFFocusCombatBar = CreateFrame("StatusBar", nil, FocusFrame)
+    BBF = { HealthBar = function(frame) if frame == FocusFrame then return BBFFocusCombatBar end end }
+""")
+step("focus bar swaps during combat lockdown", lambda: H.update(1.1))
+check("  focus marker parent stays on BlizzardFocusBar during combat",
+      same(focus_markers_p[0].parent, G.BlizzardFocusBar) if focus_markers_p else None, True)
+check("  focus marker lifted to HIGH fallback while stuck off-bar",
+      (focus_markers_p[0].strata, focus_markers_p[0].level >= 2006) if focus_markers_p else None, ("HIGH", True))
+G.combat = False
+step("leaving combat moves focus marker onto BBFFocusCombatBar", lambda: H.update(1.1))
+check("  focus marker parent moved to BBFFocusCombatBar",
+      same(focus_markers_p[0].parent, G.BBFFocusCombatBar) if focus_markers_p else None, True)
+check("  focus marker returns to MEDIUM/1006",
+      (focus_markers_p[0].strata, focus_markers_p[0].level) if focus_markers_p else None, ("MEDIUM", 1006))
+
+lua.execute("BBF, BBFFocusCombatBar = nil, nil; focusGuid = nil; UnitName = savedFocusUnitName; FocusFrame.GetChildren = nil")
+G.targetGuid = None
+G.combat = False
+H.update(1.1)
 
 
 def lua_quote(text):

@@ -114,53 +114,100 @@ local LAYER_CHECK_INTERVAL = 1
 local layerCheckedAt, topStrata, topLevel, layerBar = -math.huge, nil, nil, nil
 
 local MAX_LAYER_FRAMES = 300 -- as in Display.lua: other addons' frames under it can make the walk slow (#36)
+local MAX_FRAME_LEVEL = 10000
+local lastStuck, lastGamepad = false, false
 
-local function topLayer(root)
-    if not root or root == UIParent then return "BACKGROUND", 0 end
-    local bestStrata, bestLevel, visited = "BACKGROUND", 0, 0
+local function gamepadUI()
+    local ok, using = pcall(IsUsingGamepad)
+    return ok and using == true
+end
+
+local function topLayer(root, bar)
+    if not root or root == UIParent then return "BACKGROUND", 0, false end
+    local bestStrata, bestLevel, visited, sawSecret = "BACKGROUND", 0, 0, false
+    local function own(frame)
+        return widgets ~= nil and (frame == widgets.marker or frame == widgets.iconWindow or frame == widgets.iconBar)
+    end
+    local function consider(frame)
+        -- Some of Blizzard's frames report a secret strata/level in Forever; note it so updateLayering uses a safe floor.
+        local ok, strata, level = pcall(function() return frame:GetFrameStrata(), frame:GetFrameLevel() end)
+        if not ok or isSecret(strata) or isSecret(level) or type(strata) ~= "string" or type(level) ~= "number" then
+            sawSecret = true
+            return
+        end
+        local rank, bestRank = STRATA_RANK[strata] or 0, STRATA_RANK[bestStrata] or 0
+        if rank > bestRank then
+            bestStrata, bestLevel = strata, level
+        elseif rank == bestRank and level > bestLevel then
+            bestLevel = level
+        end
+    end
     local function visit(frame, depth)
+        if own(frame) then return end
         if depth > 0 then
             -- Hidden children draw nothing; Edit Mode keeps a hidden MEDIUM/1000 selection frame under FocusFrame.
             local okShown, shown = pcall(frame.IsShown, frame)
             if okShown and not isSecret(shown) and shown == false then return end
         end
         local okForb, forb = pcall(function() return frame.IsForbidden and frame:IsForbidden() end)
-        if not okForb or isSecret(forb) or forb then return end
+        if not okForb or isSecret(forb) then
+            sawSecret = true
+            return
+        end
+        if forb then return end
         visited = visited + 1
         if visited > MAX_LAYER_FRAMES then return end
-        -- Some of Blizzard's frames report a secret strata/level; those are skipped (their children aren't).
-        local strata, level = frame:GetFrameStrata(), frame:GetFrameLevel()
-        if not isSecret(strata) and not isSecret(level) then
-            local rank, bestRank = STRATA_RANK[strata] or 0, STRATA_RANK[bestStrata] or 0
-            if rank > bestRank then
-                bestStrata, bestLevel = strata, level
-            elseif rank == bestRank and level > bestLevel then
-                bestLevel = level
-            end
-        end
+        consider(frame)
         if depth < 6 then
-            for _, child in ipairs({ frame:GetChildren() }) do
-                if visited > MAX_LAYER_FRAMES then break end
-                visit(child, depth + 1)
+            local children = { pcall(frame.GetChildren, frame) }
+            if children[1] then
+                for i = 2, #children do
+                    if visited > MAX_LAYER_FRAMES then break end
+                    visit(children[i], depth + 1)
+                end
             end
         end
     end
     visit(root, 0)
-    return bestStrata, bestLevel
+    if bar and not own(bar) then consider(bar) end
+    return bestStrata, bestLevel, sawSecret
 end
 
 -- Keeps the focus widgets above everything on the frame that holds `bar` (checked at most once a second).
 local function updateLayering(bar, now)
-    if bar ~= layerBar or now - layerCheckedAt >= LAYER_CHECK_INTERVAL then
-        layerCheckedAt, layerBar = now, bar
+    local stuck = widgets ~= nil and widgets.markerParent ~= bar
+    local gamepad = gamepadUI()
+    if bar ~= layerBar or stuck ~= lastStuck or gamepad ~= lastGamepad or now - layerCheckedAt >= LAYER_CHECK_INTERVAL then
+        layerCheckedAt, layerBar, lastStuck, lastGamepad = now, bar, stuck, gamepad
         local root = ns.frameRoot and ns.frameRoot(bar, "focus") or bar
-        local ok, strata, level = pcall(topLayer, root)
-        if ok and (strata ~= topStrata or level ~= topLevel) then
-            topStrata, topLevel = strata, level
-            ns.trace(string.format("LAYER focus frame top is %s/%d; focus marker placed above it", strata, level))
+        local ok, strata, level, sawSecret = pcall(topLayer, root, bar)
+        if ok then
+            local baseStrata, baseLevel = strata, level
+            local margin = 0
+            if sawSecret or gamepad or stuck then
+                if (STRATA_RANK[strata] or 0) < STRATA_RANK.HIGH then strata = "HIGH" end
+                margin = 1000
+            end
+            level = math.min(level + margin, MAX_FRAME_LEVEL - 25)
+            if strata ~= topStrata or level ~= topLevel then
+                topStrata, topLevel = strata, level
+                ns.trace(string.format("LAYER focus frame top is %s/%d; focus marker placed above %s/%d%s",
+                    baseStrata, baseLevel, strata, level, margin > 0 and " (fallback floor)" or ""))
+            end
         end
     end
     if topStrata then ns.barMarker.layer(widgets, topStrata, topLevel) end
+end
+
+-- Hang the focus marker directly on `bar` out of combat before the first focus DoT arrives.
+local function prepare(bar)
+    if not bar or (type(InCombatLockdown) == "function" and InCombatLockdown()) then return end
+    if widgets and widgets.healthBar == bar and widgets.markerParent == bar then return end
+    ns.barMarker.pin(host)
+    local prevParent = widgets and widgets.markerParent
+    widgets = ns.barMarker.widgetsFor(host, bar, false, true, bar)
+    if widgets.markerParent ~= prevParent then layerCheckedAt = -math.huge end
+    hide()
 end
 
 local function dead()
@@ -172,13 +219,16 @@ local function refresh()
     local db = ns.db
     if not db or not ns.barMarker then return end
     refreshPreview(db)
-    if db.focusMode == "off" or not UnitExists("focus") or dead() then return hide() end
+    if db.focusMode == "off" then return hide() end
     local bar = focusBar(db)
-    if not bar or not shown(bar) then return hide() end
+    prepare(bar)
+    if not UnitExists("focus") or dead() or not bar or not shown(bar) then return hide() end
     local entries, total = ns.dotBreakdownForUnit("focus")
     if total <= 0 then return hide() end
     ns.barMarker.pin(host)
-    widgets = ns.barMarker.widgetsFor(host, bar, false, true)
+    local prevParent = widgets and widgets.markerParent
+    widgets = ns.barMarker.widgetsFor(host, bar, false, true, bar)
+    if widgets.markerParent ~= prevParent then layerCheckedAt = -math.huge end
     updateLayering(bar, GetTime())
     ns.barMarker.draw(widgets, entries, total, UnitHealthMax("focus"), UnitHealth("focus"), focusLook)
 end

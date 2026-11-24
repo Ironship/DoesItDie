@@ -389,7 +389,7 @@ end
 
 -- pooledHost: host is a plate addon's own pooled frame (EllesmereUI), not Blizzard's nameplate.
 local function createWidgets(host, healthBar, pooledHost, matchStrata)
-    local w = { host = host }
+    local w = { host = host, markerParent = host }
 
     -- Marker: filled from the bar's left edge to the remaining DoT damage, on the mob's (secret) health scale.
     w.marker = invisibleBar(host)
@@ -543,12 +543,23 @@ end
 
 -- Widgets are made once per host and re-anchored when the host's bar changes (Blizzard swaps the bar under a
 -- plate; Platynator reassigns its displays between units): frames can't be freed, so making new ones would leak.
-local function widgetsFor(host, healthBar, pooledHost, matchStrata)
+-- markerParent: optional parent for the marker bar itself (Focus.lua hangs it on the focus bar out of combat so
+-- Forever draws it cleanly, while keeping iconWindow on host so clipping bars don't cut off the kill icon).
+local function widgetsFor(host, healthBar, pooledHost, matchStrata, markerParent)
     local w = widgetsByHost[host]
     if not w then
         w = createWidgets(host, healthBar, pooledHost, matchStrata)
     elseif w.healthBar ~= healthBar then
         attachWidgets(w, healthBar, matchStrata)
+    end
+    local want = markerParent or host
+    if w.markerParent ~= want then
+        local restricted = markerParent ~= nil or w.markerParent ~= host
+        if not (restricted and type(InCombatLockdown) == "function" and InCombatLockdown()) then
+            if pcall(w.marker.SetParent, w.marker, want) then
+                w.markerParent = want
+            end
+        end
     end
     return w
 end
@@ -645,9 +656,9 @@ ns.barMarker = {
         w.iconWindow:SetFrameStrata(strata)
         w.iconBar:SetFrameStrata(strata)
         w.strataSet = true
-        w.marker:SetFrameLevel(level + 5)
-        w.iconWindow:SetFrameLevel(level + 20)
-        w.iconBar:SetFrameLevel(level + 21)
+        w.marker:SetFrameLevel(math.min(level + 5, 9995))
+        w.iconWindow:SetFrameLevel(math.min(level + 20, 9998))
+        w.iconBar:SetFrameLevel(math.min(level + 21, 9999))
     end,
 }
 

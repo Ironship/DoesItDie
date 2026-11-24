@@ -694,6 +694,45 @@ end
 local visibilityFrame, layerRoot
 local attachedSignature
 
+local STRATA_RANK = {
+    BACKGROUND = 1, LOW = 2, MEDIUM = 3, HIGH = 4, DIALOG = 5, FULLSCREEN = 6, FULLSCREEN_DIALOG = 7, TOOLTIP = 8,
+}
+local LAYER_CHECK_INTERVAL = 1
+-- The walk below visits every frame under the target frame. Other addons can hang many frames there (and keep
+-- adding them), and a walk over thousands of frames every second caused ~80 ms stutters (issue #36), so it stops
+-- after this many. A walk slower than SLOW_LAYER_MS is logged once, naming the frame and the count.
+local MAX_LAYER_FRAMES = 300
+local SLOW_LAYER_MS = 10
+local MAX_FRAME_LEVEL = 10000
+local layerCheckedAt, lastStrata, lastLevel, layerErrorLogged, slowLayerLogged = 0, nil, nil, false, false
+
+-- Own display frames: skipped during the target-frame tree scan so parenting the marker onto healthBar never
+-- visits our own overlays or raises their level tick after tick.
+local OWN_FRAMES = {
+    [remainingBar] = true,
+    [fillLayer] = true,
+    [clipLayer] = true,
+    [outlineLayer] = true,
+    [sparkLayer] = true,
+    [skullWindow] = true,
+    [skullBar] = true,
+}
+
+-- On Forever's unit frames, a marker parented to UIParent in the target frame's LOW strata can fail to draw
+-- over the health bar, whereas parenting it directly to healthBar draws reliably (as nameplate markers hang on
+-- their plate) while staying below the world map. Reparenting onto a unit frame is blocked in combat lockdown,
+-- so this moves it whenever out of combat; the options preview keeps it on UIParent.
+local markerParent = UIParent
+local function syncMarkerParent()
+    if type(InCombatLockdown) == "function" and InCombatLockdown() then return end
+    local want = (not previewHost and healthBar) or UIParent
+    if markerParent ~= want and pcall(remainingBar.SetParent, remainingBar, want) then
+        markerParent = want
+        layerCheckedAt = 0
+        trace("PARENT marker now hangs on " .. (want == UIParent and "UIParent" or regionName(want)))
+    end
+end
+
 -- Attaches the display to the preview, the custom frames (Advanced options) or Blizzard's target frame.
 -- Without `force`, only re-attaches if the frames to use changed (custom frames may be created late, or
 -- rebuilt by their addon), so it's cheap to call on every target change.
@@ -715,7 +754,10 @@ local function attach(force)
         portrait = customAnchor or knownPortrait or (customBar == nil and findTargetPortrait()) or nil
     end
     local signature = tostring(previewHost) .. tostring(bar) .. tostring(portrait)
-    if not force and signature == attachedSignature then return portrait ~= nil end
+    if not force and signature == attachedSignature then
+        syncMarkerParent()
+        return portrait ~= nil
+    end
     attachedSignature = signature
 
     skullAnchor = portrait or customBar or TargetFrame or UIParent
@@ -726,6 +768,7 @@ local function attach(force)
     plainSkullFrame:SetPoint("BOTTOM", skullWindow, "TOP", 0, 4)
 
     healthBar = bar
+    syncMarkerParent()
     if healthBar then
         remainingBar:ClearAllPoints()
         remainingBar:SetAllPoints(healthBar)
@@ -759,15 +802,30 @@ function ns.attachStatus()
         line(db.customIconAnchor, ns.resolveFramePath(db.customIconAnchor), iconFallback)
 end
 
-local STRATA_RANK = {
-    BACKGROUND = 1, LOW = 2, MEDIUM = 3, HIGH = 4, DIALOG = 5, FULLSCREEN = 6, FULLSCREEN_DIALOG = 7, TOOLTIP = 8,
-}
-local LAYER_CHECK_INTERVAL = 1
--- The walk below visits every frame under the target frame. Other addons can hang many frames there (and keep
--- adding them), and a walk over thousands of frames every second caused ~80 ms stutters (issue #36), so it stops
--- after this many. A walk slower than SLOW_LAYER_MS is logged once, naming the frame and the count.
-local MAX_LAYER_FRAMES = 300
-local SLOW_LAYER_MS = 10
+-- Portraits (e.g. TargetFramePortrait) are Textures with no strata/level methods; unwrap them to their parent frame.
+local function frameOf(region)
+    if type(region) ~= "table" then return nil end
+    local ok, objType = pcall(region.GetObjectType, region)
+    if ok and not isSecret(objType) and type(objType) == "string" then
+        local lower = objType:lower()
+        if lower == "texture" or lower == "fontstring" or lower == "masktexture" then
+            local okParent, parent = pcall(region.GetParent, region)
+            if okParent and not isSecret(parent) and type(parent) == "table" then return parent end
+            return nil
+        end
+    end
+    if type(region.GetFrameStrata) ~= "function" or type(region.GetFrameLevel) ~= "function" then
+        local okParent, parent = pcall(region.GetParent, region)
+        if okParent and not isSecret(parent) and type(parent) == "table" then return parent end
+        return nil
+    end
+    return region
+end
+
+local function gamepadUI()
+    local ok, using = pcall(IsUsingGamepad)
+    return ok and using == true
+end
 
 -- Highest strata/level of the target frame and of what is shown under it (and how many frames were visited).
 -- Blizzard (Edit Mode) re-layers the target frame after addons load, so a level picked once at load ends up
@@ -776,37 +834,53 @@ local SLOW_LAYER_MS = 10
 -- marker and skull into the world map's strata, above the map's art.
 local function targetFrameTopLayer()
     local root = layerRoot or healthBar
-    if not root or root == UIParent then return "BACKGROUND", 0, 0 end
-    local topStrata, topLevel, visited = "BACKGROUND", 0, 0
+    if not root or root == UIParent then return "BACKGROUND", 0, 0, false end
+    local topStrata, topLevel, visited, sawSecret = "BACKGROUND", 0, 0, false
+    -- Some of Blizzard's frames report a secret strata/level in Forever; note it so updateLayering uses a safe floor.
+    local function consider(frame)
+        local ok, strata, level = pcall(function() return frame:GetFrameStrata(), frame:GetFrameLevel() end)
+        if not ok or isSecret(strata) or isSecret(level) or type(strata) ~= "string" or type(level) ~= "number" then
+            sawSecret = true
+            return
+        end
+        local rank, topRank = STRATA_RANK[strata] or 0, STRATA_RANK[topStrata] or 0
+        if rank > topRank then
+            topStrata, topLevel = strata, level
+        elseif rank == topRank and level > topLevel then
+            topLevel = level
+        end
+    end
     local function visit(frame, depth)
+        if OWN_FRAMES[frame] then return end
         if depth > 0 then
             local okShown, shown = pcall(frame.IsShown, frame)
             if okShown and not isSecret(shown) and shown == false then return end
         end
         local okForb, forb = pcall(function() return frame.IsForbidden and frame:IsForbidden() end)
-        if not okForb or isSecret(forb) or forb then return end
+        if not okForb or isSecret(forb) then
+            sawSecret = true
+            return
+        end
+        if forb then return end
         visited = visited + 1
         if visited > MAX_LAYER_FRAMES then return end
-        -- Some of Blizzard's frames report a secret strata/level in Forever; those can't be compared, so skip
-        -- them (their children are still visited).
-        local strata, level = frame:GetFrameStrata(), frame:GetFrameLevel()
-        if not isSecret(strata) and not isSecret(level) then
-            local rank, topRank = STRATA_RANK[strata] or 0, STRATA_RANK[topStrata] or 0
-            if rank > topRank then
-                topStrata, topLevel = strata, level
-            elseif rank == topRank and level > topLevel then
-                topLevel = level
-            end
-        end
+        consider(frame)
         if depth < 6 then
-            for _, child in ipairs({ frame:GetChildren() }) do
-                if visited > MAX_LAYER_FRAMES then break end
-                visit(child, depth + 1)
+            local children = { pcall(frame.GetChildren, frame) }
+            if children[1] then
+                for i = 2, #children do
+                    if visited > MAX_LAYER_FRAMES then break end
+                    visit(children[i], depth + 1)
+                end
             end
         end
     end
     visit(root, 0)
-    return topStrata, topLevel, visited
+    -- The walk can stop at MAX_LAYER_FRAMES or depth 6 before reaching them; always check the frames we draw over.
+    if healthBar and not OWN_FRAMES[healthBar] then consider(healthBar) end
+    local anchorFrame = skullAnchor and skullAnchor ~= UIParent and frameOf(skullAnchor) or nil
+    if anchorFrame and anchorFrame ~= UIParent and not OWN_FRAMES[anchorFrame] then consider(anchorFrame) end
+    return topStrata, topLevel, visited, sawSecret
 end
 
 -- The bar can change without a target change (BetterBlizzFrames' settings; it also comes up late), so the
@@ -816,23 +890,24 @@ local function recheckAttach(now)
     if now - attachCheckedAt < LAYER_CHECK_INTERVAL then return end
     attachCheckedAt = now
     attach()
+    syncMarkerParent()
 end
 
 -- Keeps our marker and skull above everything on the target frame. Checked only while they show (throttled)
 -- because Blizzard can re-layer the frame at any time; nothing needs layering while they're hidden.
-local layerCheckedAt, lastStrata, lastLevel, layerErrorLogged, slowLayerLogged = 0, nil, nil, false, false
 local function updateLayering(now)
+    syncMarkerParent()
     if now - layerCheckedAt < LAYER_CHECK_INTERVAL then return end
     layerCheckedAt = now
-    local ok, strata, level, visited
+    local ok, strata, level, visited, sawSecret
     if previewHost then
         -- One strata above the options window: it's a top-level frame, which WoW raises above everything else
         -- in its own strata (our frames included) when it's shown or clicked. Dropdowns and tooltips sit higher.
-        ok, strata, level = true, "FULLSCREEN", 1
+        ok, strata, level, visited, sawSecret = true, "FULLSCREEN", 1, 0, false
     else
         local clock = type(debugprofilestop) == "function" and debugprofilestop or nil
         local started = clock and clock()
-        ok, strata, level, visited = pcall(targetFrameTopLayer)
+        ok, strata, level, visited, sawSecret = pcall(targetFrameTopLayer)
         local ms = started and (clock() - started)
         local capped = ok and visited > MAX_LAYER_FRAMES
         if ok and not slowLayerLogged and (capped or (ms and ms > SLOW_LAYER_MS)) then
@@ -849,13 +924,28 @@ local function updateLayering(now)
         end
         return
     end
+    local topStrata, topLevel = strata, level
+    local levelMargin = 0
+    local gamepad = not previewHost and gamepadUI()
+    local stuckOnScreen = not previewHost and healthBar ~= nil and markerParent ~= healthBar
+    if not previewHost and (sawSecret or gamepad or stuckOnScreen) then
+        if (STRATA_RANK[strata] or 0) < STRATA_RANK.HIGH then strata = "HIGH" end
+        levelMargin = 1000
+    end
+    local placedLevel = math.min(level + levelMargin, MAX_FRAME_LEVEL - 8)
     for i, frame in ipairs({ remainingBar, fillLayer, clipLayer, outlineLayer, sparkLayer, skullWindow, skullBar }) do
         frame:SetFrameStrata(strata)
-        frame:SetFrameLevel(level + i)
+        frame:SetFrameLevel(placedLevel + i)
     end
-    if strata ~= lastStrata or level ~= lastLevel then
-        lastStrata, lastLevel = strata, level
-        trace(string.format("LAYER target frame top is %s/%d; marker and skull placed above it", strata, level))
+    if not previewHost and (sawSecret or gamepad) then
+        local skullLevel = math.min(math.max(placedLevel + 6, 2000), MAX_FRAME_LEVEL - 2)
+        skullWindow:SetFrameLevel(skullLevel)
+        skullBar:SetFrameLevel(skullLevel + 1)
+    end
+    if strata ~= lastStrata or placedLevel ~= lastLevel then
+        lastStrata, lastLevel = strata, placedLevel
+        trace(string.format("LAYER target frame top is %s/%d; marker and skull placed at %s/%d%s",
+            topStrata, topLevel, strata, placedLevel + 1, levelMargin > 0 and " (fallback floor)" or ""))
     end
 end
 
